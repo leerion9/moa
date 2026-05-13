@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# 환경변수 (시크릿)
+.env
+
+# 데이터 / 로그 / 캐시
+data/logs/
+data/universe_cache_*.json
+data/positions.json
+data/kr_symbol_master.json
+data/symbol_names.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# pytest
+.pytest_cache/
+.coverage
+htmlcov/
