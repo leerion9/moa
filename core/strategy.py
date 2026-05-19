@@ -3,75 +3,110 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 
-from core.api_client import Quote
-
 
 @dataclass
 class SymbolState:
-    avg_volume_5d: int
-    prev_high: int
-    prev_low: int
-    breakout_k: float
-    breakout_price: Optional[int] = None
-    a_met: bool = False
-    bought: bool = False
-    seen: bool = False
-    skip: bool = False
+    """종목별 감시 상태 (52주 신고가 돌파 매매)."""
+    w52_high: int       # 52주 신고가 가격
+    vol_ma20: int       # 20일 평균 거래량
+
+    bought: bool = False        # 오늘 매수 주문 완료 여부
+    skip: bool = False          # 감시 제외 여부
     skip_reason: str = ""
+
+    # 포지션 추적 (매수 이후)
+    buy_price: int = 0          # 매수 체결가
+    qty: int = 0                # 보유 수량
+    peak_price: int = 0         # 매수 후 최고가 (트레일링 스탑용)
 
 
 @dataclass
 class EntrySignal:
     symbol: str
-    breakout_price: int
-    reason: str = "A_then_B_breakout"
+    entry_price: int            # 52주 신고가 = 진입 호가
+    reason: str = "w52_high_breakout"
 
 
 @dataclass
-class SkipSignal:
+class SellSignal:
     symbol: str
-    reason: str = "skip_initial_AB_met"
+    qty: int
+    reason: str                 # "trailing_stop"
 
 
 @dataclass
-class VolatilityBreakoutStrategy:
+class W52HighStrategy:
+    """
+    52주 신고가 돌파 매매 전략.
+
+    매수: 현재가 >= 52주 신고가 AND 당일 거래량 >= 20일 평균 거래량
+    매도: 최고가 대비 trailing_stop_pct 이상 하락 시 전량 시장가
+    """
+    trailing_stop_pct: float
     symbol_state: Dict[str, SymbolState] = field(default_factory=dict)
 
-    def register(self, symbol: str, avg_volume_5d: int, prev_high: int, prev_low: int, breakout_k: float) -> None:
+    def register(self, symbol: str, w52_high: int, vol_ma20: int) -> None:
+        """감시 목록에 종목 등록."""
         self.symbol_state[symbol] = SymbolState(
-            avg_volume_5d=avg_volume_5d,
-            prev_high=prev_high,
-            prev_low=prev_low,
-            breakout_k=breakout_k,
+            w52_high=w52_high,
+            vol_ma20=vol_ma20,
         )
 
-    def on_quote(self, quote: Quote) -> Optional[EntrySignal]:
-        state = self.symbol_state.get(quote.symbol)
+    def register_position(self, symbol: str, buy_price: int, qty: int) -> None:
+        """매수 체결 후 포지션 등록 (트레일링 스탑 추적 시작)."""
+        state = self.symbol_state.get(symbol)
+        if state is None:
+            return
+        state.buy_price = buy_price
+        state.qty = qty
+        state.peak_price = buy_price
+
+    def on_quote(self, symbol: str, current_price: int, current_volume: int) -> Optional[EntrySignal]:
+        """
+        장중 시세 수신 시 매수 신호 체크.
+        이미 매수된 종목 또는 스킵 종목은 None 반환.
+        """
+        state = self.symbol_state.get(symbol)
         if state is None or state.bought or state.skip:
             return None
 
-        if state.breakout_price is None and quote.open_price > 0:
-            state.breakout_price = int(
-                quote.open_price + (state.prev_high - state.prev_low) * state.breakout_k
-            )
-
-        if not state.seen:
-            state.seen = True
-            if (
-                state.breakout_price is not None
-                and quote.volume >= state.avg_volume_5d
-                and quote.current_price >= state.breakout_price
-            ):
-                state.skip = True
-                state.skip_reason = "initial_quote_meets_A_and_B"
-                return None
-
-        if (not state.a_met) and quote.volume >= state.avg_volume_5d:
-            state.a_met = True
+        if current_price < state.w52_high:
             return None
 
-        if state.a_met and state.breakout_price is not None and quote.current_price >= state.breakout_price:
-            state.bought = True
-            return EntrySignal(symbol=quote.symbol, breakout_price=state.breakout_price)
+        # 거래량 조건: 당일 누적 거래량 >= 20일 평균
+        if current_volume < state.vol_ma20:
+            state.skip = True
+            state.skip_reason = "volume_insufficient"
+            return None
+
+        state.bought = True
+        return EntrySignal(symbol=symbol, entry_price=state.w52_high)
+
+    def on_position_quote(self, symbol: str, current_price: int) -> Optional[SellSignal]:
+        """
+        보유 포지션 시세 수신 시 트레일링 스탑 체크.
+        trailing_stop_pct 이상 고점 대비 하락 시 전량 매도 신호 반환.
+        """
+        state = self.symbol_state.get(symbol)
+        if state is None or state.qty <= 0:
+            return None
+
+        if current_price > state.peak_price:
+            state.peak_price = current_price
+
+        if state.peak_price > 0:
+            drop = (state.peak_price - current_price) / state.peak_price
+            if drop >= self.trailing_stop_pct:
+                qty = state.qty
+                state.qty = 0
+                return SellSignal(symbol=symbol, qty=qty, reason="trailing_stop")
 
         return None
+
+    def held_symbols(self) -> list[str]:
+        """현재 포지션 보유 중인 종목 목록."""
+        return [s for s, st in self.symbol_state.items() if st.qty > 0]
+
+    def watchlist_symbols(self) -> list[str]:
+        """아직 매수 안 된 감시 중 종목 목록."""
+        return [s for s, st in self.symbol_state.items() if not st.bought and not st.skip]

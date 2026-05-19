@@ -1,79 +1,86 @@
-from core.api_client import Quote
-from core.strategy import VolatilityBreakoutStrategy
+from core.strategy import W52HighStrategy
 
 
-def test_entry_only_when_a_then_b():
-    s = VolatilityBreakoutStrategy()
-    # breakout = open(69000) + (prev_high-prev_low=2500) * k(0.4) = 70000
-    s.register("005930", avg_volume_5d=1000, prev_high=70500, prev_low=68000, breakout_k=0.4)
-
-    # B 먼저 만족 (A 미충족): 진입 금지
-    signal = s.on_quote(
-        Quote(
-            symbol="005930",
-            current_price=71000,
-            open_price=69000,
-            volume=900,
-            prev_high=70500,
-            prev_low=68000,
-        )
-    )
-    assert signal is None
-
-    # A 충족
-    signal = s.on_quote(
-        Quote(
-            symbol="005930",
-            current_price=69500,
-            open_price=69000,
-            volume=1000,
-            prev_high=70500,
-            prev_low=68000,
-        )
-    )
-    assert signal is None
-
-    # A 이후 B 충족: 진입
-    signal = s.on_quote(
-        Quote(
-            symbol="005930",
-            current_price=70000,
-            open_price=69000,
-            volume=1100,
-            prev_high=70500,
-            prev_low=68000,
-        )
-    )
-    assert signal is not None
-    assert signal.symbol == "005930"
+TRAILING_STOP = 0.075
 
 
-def test_skip_when_initial_quote_meets_a_and_b():
-    s = VolatilityBreakoutStrategy()
-    s.register("005930", avg_volume_5d=1000, prev_high=70500, prev_low=68000, breakout_k=0.4)
+def test_entry_signal_on_w52_high_touch():
+    """52주 신고가 터치 + 거래량 충족 시 매수 신호 발생."""
+    s = W52HighStrategy(trailing_stop_pct=TRAILING_STOP)
+    s.register("005930", w52_high=70000, vol_ma20=1000)
 
-    # 첫 관측에서 A(volume)와 B(price>=breakout) 동시 충족이면 스킵
-    signal = s.on_quote(
-        Quote(
-            symbol="005930",
-            current_price=70500,
-            open_price=69000,
-            volume=2000,
-            prev_high=70500,
-            prev_low=68000,
-        )
-    )
-    assert signal is None
+    # 신고가 미달: 신호 없음
+    sig = s.on_quote("005930", current_price=69999, current_volume=2000)
+    assert sig is None
 
-    # 이후 조건이 계속 충족되어도 매수 시그널이 나오면 안 됨
-    signal = s.on_quote(
-        Quote(
-            symbol="005930",
-            current_price=71000,
-            open_price=69000,
-            volume=3000,
-            prev_high=70500,
-            prev_low=68000,
-        )
-    )
-    assert signal is None
+    # 신고가 터치 + 거래량 충족: 신호 발생
+    sig = s.on_quote("005930", current_price=70000, current_volume=1000)
+    assert sig is not None
+    assert sig.symbol == "005930"
+    assert sig.entry_price == 70000
+
+
+def test_no_entry_when_volume_insufficient():
+    """거래량 미충족 시 신호 없음."""
+    s = W52HighStrategy(trailing_stop_pct=TRAILING_STOP)
+    s.register("005930", w52_high=70000, vol_ma20=1000)
+
+    sig = s.on_quote("005930", current_price=70000, current_volume=999)
+    assert sig is None
+
+
+def test_no_double_entry():
+    """이미 매수된 종목은 다시 신호 안 나옴."""
+    s = W52HighStrategy(trailing_stop_pct=TRAILING_STOP)
+    s.register("005930", w52_high=70000, vol_ma20=1000)
+
+    s.on_quote("005930", current_price=70000, current_volume=1000)
+    sig = s.on_quote("005930", current_price=71000, current_volume=2000)
+    assert sig is None
+
+
+def test_trailing_stop_triggers():
+    """최고가 대비 trailing_stop_pct 이상 하락 시 매도 신호 발생."""
+    s = W52HighStrategy(trailing_stop_pct=TRAILING_STOP)
+    s.register("005930", w52_high=70000, vol_ma20=1000)
+    s.on_quote("005930", current_price=70000, current_volume=1000)
+    s.register_position("005930", buy_price=70000, qty=10)
+
+    # 최고가 80000 도달
+    s.on_position_quote("005930", current_price=80000)
+
+    # 80000 * (1 - 0.075) = 74000: 74000 이하 하락 시 매도
+    sell = s.on_position_quote("005930", current_price=73999)
+    assert sell is not None
+    assert sell.symbol == "005930"
+    assert sell.qty == 10
+    assert sell.reason == "trailing_stop"
+
+
+def test_trailing_stop_not_triggered_before_threshold():
+    """최고가 대비 하락이 기준 미만이면 매도 신호 없음."""
+    s = W52HighStrategy(trailing_stop_pct=TRAILING_STOP)
+    s.register("005930", w52_high=70000, vol_ma20=1000)
+    s.on_quote("005930", current_price=70000, current_volume=1000)
+    s.register_position("005930", buy_price=70000, qty=10)
+
+    s.on_position_quote("005930", current_price=80000)
+
+    # 80000 * (1 - 0.074) = 74080: 아직 기준 미달
+    sell = s.on_position_quote("005930", current_price=74080)
+    assert sell is None
+
+
+def test_peak_price_updates():
+    """최고가가 계속 갱신되어야 트레일링이 올바르게 작동."""
+    s = W52HighStrategy(trailing_stop_pct=TRAILING_STOP)
+    s.register("005930", w52_high=70000, vol_ma20=1000)
+    s.on_quote("005930", current_price=70000, current_volume=1000)
+    s.register_position("005930", buy_price=70000, qty=5)
+
+    s.on_position_quote("005930", current_price=75000)
+    s.on_position_quote("005930", current_price=90000)  # 최고가 갱신
+
+    # 90000 * (1 - 0.075) = 83250: 83250 이하 시 매도
+    sell = s.on_position_quote("005930", current_price=83249)
+    assert sell is not None

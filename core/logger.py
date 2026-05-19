@@ -13,7 +13,7 @@ class TradeLogger:
         self.log_dir = log_dir
         self.log_dir.mkdir(parents=True, exist_ok=True)
 
-        self._logger = logging.getLogger("maxv")
+        self._logger = logging.getLogger("moa")
         self._logger.setLevel(logging.INFO)
         self._logger.propagate = False
 

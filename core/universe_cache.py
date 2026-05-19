@@ -10,17 +10,16 @@ from zoneinfo import ZoneInfo
 
 @dataclass(frozen=True)
 class CachedSymbol:
-    avg_volume_5d: int
-    prev_high: int
-    prev_low: int
+    w52_high: int           # 52주 최고가 (원)
+    vol_ma20: int           # 20일 평균 거래량
+    w52_hit_60d: int        # 최근 60일 내 52주 신고가 터치 횟수 (전략1 필터용)
+    w52_hit_10d: int        # 최근 10일 내 52주 신고가 터치 횟수 (전략2 필터용)
 
 
 @dataclass(frozen=True)
 class UniverseCache:
-    date_kst: str  # YYYYMMDD
-    source: str
-    top_ratio: float
-    breakout_k: float
+    date_kst: str           # YYYYMMDD
+    strategy_mode: int      # 1 or 2
     created_at_iso: str
     symbols: Dict[str, CachedSymbol]
 
@@ -34,20 +33,28 @@ def cache_path(base_dir: Path, date_kst: str) -> Path:
     return base_dir / f"universe_cache_{date_kst}.json"
 
 
-def load_cache(path: Path) -> Optional[UniverseCache]:
+def load_cache(path: Path, strategy_mode: int) -> Optional[UniverseCache]:
     if not path.exists():
         return None
-    data = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+    if str(data.get("strategy_mode", "")) != str(strategy_mode):
+        return None
+
     symbols_raw = data.get("symbols", {}) or {}
     symbols: Dict[str, CachedSymbol] = {}
     for sym, row in symbols_raw.items():
         try:
             symbols[str(sym)] = CachedSymbol(
-                avg_volume_5d=int(row["avg_volume_5d"]),
-                prev_high=int(row["prev_high"]),
-                prev_low=int(row["prev_low"]),
+                w52_high=int(row["w52_high"]),
+                vol_ma20=int(row["vol_ma20"]),
+                w52_hit_60d=int(row.get("w52_hit_60d", 0)),
+                w52_hit_10d=int(row.get("w52_hit_10d", 0)),
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             continue
 
     if not symbols:
@@ -55,9 +62,7 @@ def load_cache(path: Path) -> Optional[UniverseCache]:
 
     return UniverseCache(
         date_kst=str(data.get("date_kst", "")),
-        source=str(data.get("source", "")),
-        top_ratio=float(data.get("top_ratio", 0.0) or 0.0),
-        breakout_k=float(data.get("breakout_k", 0.0) or 0.0),
+        strategy_mode=int(data.get("strategy_mode", 0)),
         created_at_iso=str(data.get("created_at_iso", "")),
         symbols=symbols,
     )
@@ -67,18 +72,16 @@ def save_cache(path: Path, cache: UniverseCache) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "date_kst": cache.date_kst,
-        "source": cache.source,
-        "top_ratio": cache.top_ratio,
-        "breakout_k": cache.breakout_k,
+        "strategy_mode": cache.strategy_mode,
         "created_at_iso": cache.created_at_iso,
         "symbols": {
             sym: {
-                "avg_volume_5d": row.avg_volume_5d,
-                "prev_high": row.prev_high,
-                "prev_low": row.prev_low,
+                "w52_high": row.w52_high,
+                "vol_ma20": row.vol_ma20,
+                "w52_hit_60d": row.w52_hit_60d,
+                "w52_hit_10d": row.w52_hit_10d,
             }
             for sym, row in cache.symbols.items()
         },
     }
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-

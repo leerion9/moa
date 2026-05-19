@@ -7,7 +7,7 @@ from typing import FrozenSet, Tuple
 
 from config.settings import Settings
 
-_log = logging.getLogger("maxv")
+_log = logging.getLogger("moa")
 
 
 def _is_weekend_ymd(ymd: str) -> bool:

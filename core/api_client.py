@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 
 from config.settings import Settings
 
-_log = logging.getLogger("maxv")
+_log = logging.getLogger("moa")
 
 
 def _kis_json_payload_rate_limited(data: object) -> bool:

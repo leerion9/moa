@@ -15,7 +15,7 @@ from bs4 import BeautifulSoup
 from zoneinfo import ZoneInfo
 from datetime import datetime
 
-_log = logging.getLogger("maxv")
+_log = logging.getLogger("moa")
 
 _UA = {
     "User-Agent": (
