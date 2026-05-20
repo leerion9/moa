@@ -15,6 +15,14 @@ from config.settings import Settings
 _log = logging.getLogger("moa")
 
 
+def _safe_abs_int(val: object, default: int = 0) -> int:
+    """KIS 응답 필드를 안전하게 int로 변환. 콤마·None·빈 문자열 허용."""
+    try:
+        return abs(int(str(val or "").replace(",", "") or default))
+    except Exception:
+        return default
+
+
 def _kis_json_payload_rate_limited(data: object) -> bool:
     if not isinstance(data, dict):
         return False
@@ -41,6 +49,17 @@ class Quote:
     volume: int
     prev_high: int
     prev_low: int
+    w52_high: int = 0   # 52주 최고가 (0=미지원/조회불가)
+    w52_low: int = 0    # 52주 최저가
+
+
+@dataclass
+class SymbolHistory:
+    """FHKST03010100 단일 호출로 조회한 52주 고저가 + 일봉 데이터."""
+    symbol: str
+    w52_high: int               # 52주 최고가
+    w52_low: int                # 52주 최저가
+    bars: List[Dict[str, object]]  # 최신순 OHLCV rows (date, open, high, low, close, volume)
 
 
 class KISApiClient:
@@ -356,11 +375,13 @@ class KISApiClient:
 
         return Quote(
             symbol=symbol,
-            current_price=abs(int(output["stck_prpr"])),
-            open_price=abs(int(output["stck_oprc"])),
-            volume=abs(int(output["acml_vol"])),
-            prev_high=abs(int(output["stck_hgpr"])),
-            prev_low=abs(int(output["stck_lwpr"])),
+            current_price=_safe_abs_int(output.get("stck_prpr")),
+            open_price=_safe_abs_int(output.get("stck_oprc")),
+            volume=_safe_abs_int(output.get("acml_vol")),
+            prev_high=_safe_abs_int(output.get("stck_hgpr")),
+            prev_low=_safe_abs_int(output.get("stck_lwpr")),
+            w52_high=_safe_abs_int(output.get("w52_hgpr")),
+            w52_low=_safe_abs_int(output.get("w52_lwpr")),
         )
 
     def get_daily_prices(self, symbol: str, days: int = 6) -> List[Dict[str, int]]:
@@ -417,6 +438,141 @@ class KISApiClient:
                 }
             )
         return parsed
+
+    def get_symbol_history(self, symbol: str, days: int = 130) -> SymbolHistory:
+        """
+        KIS: 국내주식기간별시세(일봉) — FHKST03010100
+
+        52주 고저가(output1)와 일봉 OHLCV(output2)를 단일 호출 계열로 조회.
+        days > 100이면 자동 페이징(backward).
+
+        Returns:
+            SymbolHistory.bars: 최신순 정렬, len <= days
+        """
+        url = f"{self.settings.base_url}/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice"
+        # 충분한 달력일 버퍼: 거래일 1일 ≈ 1.5 달력일 + 여유
+        calendar_days = int(days * 1.6) + 30
+        kst_today = datetime.now(ZoneInfo("Asia/Seoul"))
+        start_dt = kst_today - timedelta(days=calendar_days)
+        start_yyyymmdd = start_dt.strftime("%Y%m%d")
+        end_yyyymmdd = kst_today.strftime("%Y%m%d")
+
+        all_bars: List[Dict[str, object]] = []
+        w52_high = 0
+        w52_low = 0
+        w52_fetched = False
+
+        for _page in range(15):  # 최대 15페이지 = 1500행 (252일 충분)
+            params = {
+                "FID_COND_MRKT_DIV_CODE": "J",
+                "FID_INPUT_ISCD": symbol,
+                "FID_INPUT_DATE_1": start_yyyymmdd,
+                "FID_INPUT_DATE_2": end_yyyymmdd,
+                "FID_PERIOD_DIV_CODE": "D",
+                "FID_ORG_ADJ_PRC": "1",
+            }
+            data = self._request_get_json(
+                url,
+                tr_id="FHKST03010100",
+                params=params,
+                error_prefix=f"symbol-history {symbol}",
+            )
+
+            # output1: 종목 기본 정보 (52주 고저가 등) — 첫 페이지에서만 수집
+            if not w52_fetched:
+                out1 = data.get("output1") or {}
+                if isinstance(out1, list):
+                    out1 = out1[0] if out1 else {}
+                if isinstance(out1, dict):
+                    w52_high = _safe_abs_int(out1.get("w52_hgpr"))
+                    w52_low = _safe_abs_int(out1.get("w52_lwpr"))
+                w52_fetched = True
+
+            # output2: 일봉 배열
+            out2 = data.get("output2", [])
+            if isinstance(out2, dict):
+                out2 = [out2]
+            elif not isinstance(out2, list):
+                out2 = []
+
+            if not out2:
+                break
+
+            batch: List[Dict[str, object]] = []
+            for r in out2:
+                date_str = str(r.get("stck_bsop_date", "") or "").strip()
+                if not date_str or len(date_str) != 8:
+                    continue
+                try:
+                    batch.append({
+                        "date": date_str,
+                        "open": _safe_abs_int(r.get("stck_oprc")),
+                        "high": _safe_abs_int(r.get("stck_hgpr")),
+                        "low": _safe_abs_int(r.get("stck_lwpr")),
+                        "close": _safe_abs_int(r.get("stck_clpr")),
+                        "volume": _safe_abs_int(r.get("acml_vol")),
+                    })
+                except Exception:  # noqa: BLE001
+                    continue
+
+            all_bars.extend(batch)
+
+            if len(all_bars) >= days:
+                break
+
+            # 페이징: 이번 배치의 가장 오래된 날짜 이전으로 end 이동
+            dates_in_batch = [str(r["date"]) for r in batch if r.get("date")]
+            if not dates_in_batch:
+                break
+            oldest_in_batch = min(dates_in_batch)
+            if oldest_in_batch <= start_yyyymmdd:
+                break
+
+            oldest_dt = datetime.strptime(oldest_in_batch, "%Y%m%d")
+            end_yyyymmdd = (oldest_dt - timedelta(days=1)).strftime("%Y%m%d")
+            if end_yyyymmdd < start_yyyymmdd:
+                break
+
+            time.sleep(float(getattr(self.settings, "kis_min_request_interval_sec", 0.15)))
+
+        # 중복 제거 + 최신순 정렬 + days 개수 제한
+        seen: set = set()
+        unique: List[Dict[str, object]] = []
+        for r in all_bars:
+            d = str(r.get("date", ""))
+            if d and d not in seen:
+                seen.add(d)
+                unique.append(r)
+        unique.sort(key=lambda x: str(x.get("date", "")), reverse=True)
+
+        return SymbolHistory(
+            symbol=symbol,
+            w52_high=w52_high,
+            w52_low=w52_low,
+            bars=unique[:days],
+        )
+
+    def get_market_cap_list(self) -> List[Tuple[str, int]]:
+        """
+        KIS: KOSPI + KOSDAQ 시가총액 목록.
+
+        Returns:
+            List of (symbol, market_cap_億원) sorted by market cap descending.
+            시총 API가 반환하는 상위 종목 범위 내에서만 유효.
+        """
+        merged: Dict[str, int] = {}
+        for market in ("0001", "1001"):
+            rows = self._get_market_cap_rows(fid_input_iscd=market)
+            time.sleep(0.35)
+            for row in rows:
+                symbol = str(row.get("mksc_shrn_iscd", "") or "").strip()
+                if not symbol:
+                    continue
+                cap = _safe_abs_int(row.get("stck_avls"))
+                if cap <= 0:
+                    continue
+                merged[symbol] = max(merged.get(symbol, 0), cap)
+        return sorted(merged.items(), key=lambda x: x[1], reverse=True)
 
     def get_market_cap_rankings(self) -> List[str]:
         """
