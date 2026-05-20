@@ -71,6 +71,8 @@ class KISApiClient:
         self._last_api_monotonic: float = 0.0
         self._server_time_offset_sec: float = 0.0
         self._server_time_offset_updated_at: float = 0.0
+        # get_market_cap_list() 호출 시 부산물로 수집된 종목명 (ETF 이름 필터 fallback용)
+        self._last_cap_list_names: Dict[str, str] = {}
 
     def _token_is_valid(self) -> bool:
         return bool(self.token) and self.token_expire_at is not None and datetime.now() < self.token_expire_at
@@ -559,8 +561,13 @@ class KISApiClient:
         Returns:
             List of (symbol, market_cap_億원) sorted by market cap descending.
             시총 API가 반환하는 상위 종목 범위 내에서만 유효.
+
+        Side effect:
+            self._last_cap_list_names 에 {symbol: name} 을 저장.
+            UniverseBuilder ETF 이름 필터의 fallback으로 사용.
         """
         merged: Dict[str, int] = {}
+        cap_names: Dict[str, str] = {}
         for market in ("0001", "1001"):
             rows = self._get_market_cap_rows(fid_input_iscd=market)
             time.sleep(0.35)
@@ -572,6 +579,10 @@ class KISApiClient:
                 if cap <= 0:
                     continue
                 merged[symbol] = max(merged.get(symbol, 0), cap)
+                name = str(row.get("hts_kor_isnm", "") or "").strip()
+                if name and symbol not in cap_names:
+                    cap_names[symbol] = name
+        self._last_cap_list_names = cap_names
         return sorted(merged.items(), key=lambda x: x[1], reverse=True)
 
     def get_market_cap_rankings(self) -> List[str]:

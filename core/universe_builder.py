@@ -180,8 +180,10 @@ class UniverseBuilder:
     ) -> None:
         self.api = api
         self.settings = settings
-        # symbol_names: code→name 맵 (ETF 이름 필터용). None이면 ETF 이름 필터 생략.
+        # symbol_names: code→name 맵 (ETF 이름 필터 1순위).
         self.symbol_names: Dict[str, str] = symbol_names or {}
+        # _cap_list_names: 시총 목록 수집 시 부산물로 얻은 종목명 (ETF 이름 필터 fallback).
+        self._cap_list_names: Dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # Public
@@ -237,10 +239,15 @@ class UniverseBuilder:
     # ------------------------------------------------------------------
 
     def _fetch_cap_list(self) -> List[Tuple[str, int]]:
-        """KIS 시총 목록 조회. 부족하면 Naver fallback."""
+        """KIS 시총 목록 조회. 부족하면 Naver fallback.
+
+        부산물로 self._cap_list_names({symbol: name})를 갱신해
+        symbol_names가 없을 때 ETF 이름 필터 fallback으로 사용한다.
+        """
         result: List[Tuple[str, int]] = []
         try:
             result = self.api.get_market_cap_list()
+            self._cap_list_names = dict(getattr(self.api, "_last_cap_list_names", {}))
         except Exception as exc:
             _log.warning("[UB] KIS 시총 조회 실패(%s). Naver fallback 시도", exc)
 
@@ -254,14 +261,25 @@ class UniverseBuilder:
         """Naver 시총 페이지에서 (symbol, cap_억원) 수집."""
         try:
             from core.naver_universe import fetch_market_cap_list as naver_cap
-            return naver_cap(delay_sec=self.settings.naver_http_delay_sec)
+            cap_list, naver_names = naver_cap(delay_sec=self.settings.naver_http_delay_sec)
+            # Naver 이름을 KIS 이름으로 이미 채워진 경우 덮어쓰지 않음
+            for sym, name in naver_names.items():
+                self._cap_list_names.setdefault(sym, name)
+            return cap_list
         except Exception as exc:
             _log.error("[UB] Naver 시총 fallback 실패: %s", exc)
             return []
 
     def _apply_first_filter(self, cap_list: List[Tuple[str, int]]) -> List[str]:
-        """시총·우선주·ETF 필터 후 종목코드 리스트 반환."""
+        """시총·우선주·ETF 필터 후 종목코드 리스트 반환.
+
+        ETF 이름 필터 우선순위:
+          1. self.symbol_names (Naver 종목 마스터 — 가장 완전한 목록)
+          2. self._cap_list_names (KIS/Naver 시총 API 부산물 — 마스터 없을 때 fallback)
+        """
         min_cap = self.settings.min_market_cap_billion
+        # 이름 출처: 마스터 우선, 없으면 시총 API 부산물
+        effective_names = self.symbol_names if self.symbol_names else self._cap_list_names
         result: List[str] = []
         n_cap = n_pref = n_etf = 0
 
@@ -274,8 +292,8 @@ class UniverseBuilder:
             if not self.settings.include_preferred and is_preferred_stock(symbol):
                 n_pref += 1
                 continue
-            if not self.settings.include_etf and self.symbol_names:
-                name = self.symbol_names.get(symbol, "")
+            if not self.settings.include_etf and effective_names:
+                name = effective_names.get(symbol, "")
                 if name and is_etf_by_name(name):
                     n_etf += 1
                     continue

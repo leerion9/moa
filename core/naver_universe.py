@@ -64,12 +64,13 @@ def _select_ref_index_latest_closed(bars: List[DailyBar], today_dot: str) -> int
     return 0
 
 
-def _parse_market_sum_page(html: str) -> List[Tuple[str, int]]:
+def _parse_market_sum_page(html: str) -> List[Tuple[str, int, str]]:
+    """(종목코드, 시총_억원, 종목명) 리스트 반환."""
     soup = BeautifulSoup(html, "html.parser")
     table = soup.select_one("table.type_2")
     if not table:
         return []
-    out: List[Tuple[str, int]] = []
+    out: List[Tuple[str, int, str]] = []
     for tr in table.select("tbody tr"):
         tds = tr.find_all("td")
         if len(tds) < 10:
@@ -83,7 +84,8 @@ def _parse_market_sum_page(html: str) -> List[Tuple[str, int]]:
         cap_txt = tds[6].get_text(strip=True).replace(",", "")
         if not cap_txt.isdigit():
             continue
-        out.append((m.group(1), int(cap_txt)))
+        name = a.get_text(strip=True)
+        out.append((m.group(1), int(cap_txt), name))
     return out
 
 
@@ -101,7 +103,7 @@ def _fetch_ranked_symbols_merged(session: requests.Session, delay_sec: float) ->
             rows = _parse_market_sum_page(resp.text)
             if not rows:
                 break
-            for code, cap in rows:
+            for code, cap, _name in rows:
                 merged[code] = max(merged.get(code, 0), cap)
             time.sleep(delay_sec)
     ordered = [c for c, _ in sorted(merged.items(), key=lambda x: -x[1])]
@@ -263,14 +265,22 @@ def build_naver_universe_with_features(
     return selected, features, stats
 
 
-def fetch_market_cap_list(delay_sec: float = 0.05) -> List[Tuple[str, int]]:
+def fetch_market_cap_list(
+    delay_sec: float = 0.05,
+) -> Tuple[List[Tuple[str, int]], Dict[str, str]]:
     """
-    Naver 시총 페이지에서 (종목코드, 시가총액_억원) 목록 반환.
+    Naver 시총 페이지에서 (종목코드, 시가총액_억원) 목록과 {코드: 종목명} 맵을 반환.
     시총 내림차순 정렬. KIS API 불가 시 fallback으로 사용.
+
+    Returns:
+        (cap_list, symbol_names)
+        cap_list: [(code, cap_억원), ...] 시총 내림차순
+        symbol_names: {code: name, ...}
     """
     session = requests.Session()
     session.headers.update(_UA)
     merged: Dict[str, int] = {}
+    names: Dict[str, str] = {}
     for sosok in (0, 1):
         for page in range(1, _MAX_PAGES_PER_MARKET + 1):
             try:
@@ -284,13 +294,15 @@ def fetch_market_cap_list(delay_sec: float = 0.05) -> List[Tuple[str, int]]:
                 rows = _parse_market_sum_page(resp.text)
                 if not rows:
                     break
-                for code, cap in rows:
+                for code, cap, name in rows:
                     merged[code] = max(merged.get(code, 0), cap)
+                    if name and code not in names:
+                        names[code] = name
                 time.sleep(delay_sec)
             except Exception:
                 break
     _log.info("Naver cap list: %d종목", len(merged))
-    return sorted(merged.items(), key=lambda x: -x[1])
+    return sorted(merged.items(), key=lambda x: -x[1]), names
 
 
 def format_symbol_diff(a: List[str], b: List[str], limit: int = 40) -> Tuple[str, str]:

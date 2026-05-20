@@ -521,7 +521,7 @@ def test_builder_empty_cap_list_returns_empty_cache():
 
 
 def test_builder_etf_excluded_by_name():
-    """ETF 종목명 필터 확인."""
+    """ETF 종목명 필터 확인 (symbol_names 사용)."""
     settings = _make_settings(strategy_mode=1, rs_top_pct=1.0, include_etf=False)
 
     cap_list = [("069500", 5_000_000), ("005930", 4_000_000)]
@@ -544,6 +544,35 @@ def test_builder_etf_excluded_by_name():
     cache = builder.build()
 
     assert "069500" not in cache.symbols  # ETF 제외
+    assert "005930" in cache.symbols
+
+
+def test_builder_etf_excluded_by_cap_list_names_fallback():
+    """symbol_names 없어도 _cap_list_names(시총 API 이름) fallback으로 ETF 필터 동작."""
+    settings = _make_settings(strategy_mode=1, rs_top_pct=1.0, include_etf=False)
+
+    cap_list = [("069500", 5_000_000), ("005930", 4_000_000)]
+
+    def _make_hist(symbol):
+        bars = [
+            {"date": f"202601{i + 1:02d}", "open": 9000, "high": 9500,
+             "low": 8000, "close": 9000, "volume": 200_000}
+            for i in range(130)
+        ]
+        return SymbolHistory(symbol=symbol, w52_high=10000, w52_low=7000, bars=bars)
+
+    api = _make_api_mock(
+        cap_list=cap_list,
+        history_map={"005930": _make_hist("005930")},
+    )
+    # KIS API가 종목명을 돌려줬다고 가정 (side-channel)
+    api._last_cap_list_names = {"069500": "KODEX 200", "005930": "삼성전자"}
+
+    # symbol_names 없이 생성
+    builder = UniverseBuilder(api=api, settings=settings)
+    cache = builder.build()
+
+    assert "069500" not in cache.symbols  # cap_list_names fallback으로 ETF 제외
     assert "005930" in cache.symbols
 
 

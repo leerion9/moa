@@ -170,27 +170,34 @@ python -m pytest -q
 
 **테스트 현황**: 총 **70개 통과** (api_client 13, universe_builder 38, 기타 19)
 
-### 🔴 Phase 3 — 미완료 (다음 작업 대상)
+### ✅ Phase 3 — 완료
 
-#### 3-1. ETF 필터 보완
-- 현재: 종목 마스터(naver_symbol_master)가 있을 때만 ETF 이름 필터 동작
-- 목표: 종목 마스터 없어도 KIS API의 종목 타입 코드(`iscd_stat_cls_code`) 등으로 ETF 판별
-- 또는: `build_universe.py`가 항상 종목 마스터를 먼저 갱신하도록 강제
+#### 3-1. ETF 필터 보완 ✅
+- `KISApiClient.get_market_cap_list()`가 응답에서 `hts_kor_isnm`(종목명)을 추출해 `_last_cap_list_names`에 저장
+- `naver_universe.fetch_market_cap_list()`도 `(cap_list, names_dict)` 반환으로 변경
+- `UniverseBuilder`가 `symbol_names`(마스터) 없을 때 `_cap_list_names`(시총 API 부산물)를 ETF 이름 필터 fallback으로 사용
+- 신규 테스트: `test_builder_etf_excluded_by_cap_list_names_fallback`
 
-#### 3-2. `korea_market_holidays.txt` 연도별 자동 관리
-- 현재: 2026년 평일 공휴일 목록 수동 관리
-- 목표: KIS `get_holiday_info()` 활용하여 휴장일 자동 갱신 스크립트 추가
+#### 3-2. `korea_market_holidays.txt` 연도별 자동 관리 ✅
+- `scripts/update_holidays.py` 추가: KIS `CTCA0903R` 월별 호출 → 평일 휴장일(opnd_yn=N) 자동 수집
+- `update_holiday_file()` 함수: force 모드(해당 연도 재작성) / append 모드(중복 없이 추가)
+- 신규 테스트: `test_trading_day.py`에 6개 추가
+- 사용: `python -m scripts.update_holidays --year 2027`
 
 #### 3-3. 페이퍼 트레이딩 end-to-end 검증
-- `.env` 설정(모의투자 계정) 후 `build_universe.py` → `main.py` 실제 실행
+- `.env` 설정(모의투자 계정) 후 `build_universe.py` → `main.py` 실제 실행 (사용자가 직접 진행)
 - 로그 파일 및 trades.csv 정상 기록 확인
 
-#### 3-4. `on_quote()` 거래량 skip 로직 개선
-- 현재: 거래량 미충족 시 `state.skip=True`로 **당일 영구 제외** → 오전에 거래량 부족해도 오후에 조건 충족 가능
-- 개선안: skip 대신 매 tick마다 거래량 재확인
+#### 3-4. `on_quote()` 거래량 skip 로직 개선 ✅
+- `SymbolState.skip` 필드 제거
+- 거래량 미충족 시 해당 tick만 패스 — 다음 tick에서 재확인 (오전 부족 → 오후 충족 케이스 정상 처리)
+- `watchlist_symbols()`에서 `skip` 조건 제거, `bought` 여부만 확인
+- 신규 테스트: `test_volume_insufficient_can_retry_next_tick`, `test_watchlist_symbols_excludes_only_bought`
 
-#### 3-5. 결과 분석 도구 검토
-- `scripts/build_result.py`의 `append_result1_rows` import — `result_csv.py` 내 해당 함수 존재 여부 확인 필요
+#### 3-5. 결과 분석 도구 검토 ✅
+- `result_csv.py` 내 `append_result1_rows` 함수(line 666~) 존재 확인 — import 정상
+
+**테스트 현황**: 총 **80개 통과** (api_client 13, universe_builder 39, strategy 8, trading_day 12, result_fifo 6, 기타 2)
 
 ---
 

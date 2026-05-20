@@ -11,8 +11,6 @@ class SymbolState:
     vol_ma20: int       # 20일 평균 거래량
 
     bought: bool = False        # 오늘 매수 주문 완료 여부
-    skip: bool = False          # 감시 제외 여부
-    skip_reason: str = ""
 
     # 포지션 추적 (매수 이후)
     buy_price: int = 0          # 매수 체결가
@@ -64,19 +62,20 @@ class W52HighStrategy:
     def on_quote(self, symbol: str, current_price: int, current_volume: int) -> Optional[EntrySignal]:
         """
         장중 시세 수신 시 매수 신호 체크.
-        이미 매수된 종목 또는 스킵 종목은 None 반환.
+        이미 매수된 종목은 None 반환.
+
+        거래량 미충족 시에도 skip 처리하지 않고 다음 tick에 재확인한다.
+        (오전 거래량 부족 → 오후 충족 케이스 대응)
         """
         state = self.symbol_state.get(symbol)
-        if state is None or state.bought or state.skip:
+        if state is None or state.bought:
             return None
 
         if current_price < state.w52_high:
             return None
 
-        # 거래량 조건: 당일 누적 거래량 >= 20일 평균
+        # 거래량 조건: 당일 누적 거래량 >= 20일 평균. 미충족 시 이번 tick만 패스.
         if current_volume < state.vol_ma20:
-            state.skip = True
-            state.skip_reason = "volume_insufficient"
             return None
 
         state.bought = True
@@ -109,4 +108,4 @@ class W52HighStrategy:
 
     def watchlist_symbols(self) -> list[str]:
         """아직 매수 안 된 감시 중 종목 목록."""
-        return [s for s, st in self.symbol_state.items() if not st.bought and not st.skip]
+        return [s for s, st in self.symbol_state.items() if not st.bought]
