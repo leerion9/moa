@@ -263,6 +263,36 @@ def build_naver_universe_with_features(
     return selected, features, stats
 
 
+def fetch_market_cap_list(delay_sec: float = 0.05) -> List[Tuple[str, int]]:
+    """
+    Naver 시총 페이지에서 (종목코드, 시가총액_억원) 목록 반환.
+    시총 내림차순 정렬. KIS API 불가 시 fallback으로 사용.
+    """
+    session = requests.Session()
+    session.headers.update(_UA)
+    merged: Dict[str, int] = {}
+    for sosok in (0, 1):
+        for page in range(1, _MAX_PAGES_PER_MARKET + 1):
+            try:
+                resp = session.get(
+                    _MARKET_SUM_URL,
+                    params={"sosok": sosok, "page": page},
+                    timeout=15,
+                )
+                resp.encoding = "euc-kr"
+                resp.raise_for_status()
+                rows = _parse_market_sum_page(resp.text)
+                if not rows:
+                    break
+                for code, cap in rows:
+                    merged[code] = max(merged.get(code, 0), cap)
+                time.sleep(delay_sec)
+            except Exception:
+                break
+    _log.info("Naver cap list: %d종목", len(merged))
+    return sorted(merged.items(), key=lambda x: -x[1])
+
+
 def format_symbol_diff(a: List[str], b: List[str], limit: int = 40) -> Tuple[str, str]:
     sa, sb = set(a), set(b)
     only_a = sorted(sa - sb)
