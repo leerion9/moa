@@ -56,6 +56,7 @@ moa/
 │   ├── order.py              # 주문 실행 (매수/매도)
 │   ├── strategy.py           # 52주 신고가 전략 로직
 │   ├── trading_day.py        # 휴장일 판단
+│   ├── universe_builder.py   # 유니버스 빌더 (1차/RS/2차 필터 파이프라인)
 │   ├── universe_cache.py     # 당일 유니버스 캐시
 │   ├── naver_universe.py     # 네이버 종목 스크래핑
 │   ├── naver_symbol_master.py
@@ -63,10 +64,17 @@ moa/
 │   └── symbol_resolver.py
 ├── scripts/
 │   ├── build_result.py
+│   ├── build_universe.py     # 유니버스 배치 빌드 CLI
 │   └── update_symbol_master.py
 ├── data/
 │   └── logs/
 ├── tests/
+│   ├── test_api_client.py    # 32개 테스트
+│   ├── test_universe_builder.py  # 38개 테스트
+│   ├── test_naver_universe.py
+│   ├── test_strategy.py
+│   ├── test_result_fifo.py
+│   └── test_trading_day.py
 ├── .cursorrules
 ├── .env.example
 ├── main.py
@@ -93,6 +101,10 @@ TRAILING_STOP_PCT=0.075
 
 ## 실행
 ```bash
+# 장 시작 전 유니버스 배치 빌드 (08:00~08:50 권장)
+python -m scripts.build_universe
+
+# 매매 봇 실행
 python main.py
 ```
 
@@ -103,8 +115,88 @@ python -m pytest -q
 
 ---
 
+## 개발 진행 현황
+
+### ✅ Phase 1 — 완료 (커밋 `b56438b`)
+| 파일 | 내용 |
+|------|------|
+| `config/settings.py` | 전체 환경변수 설정 |
+| `core/api_client.py` | KIS API 클라이언트 (시세·주문·체결 조회) |
+| `core/strategy.py` | W52HighStrategy (매수신호 + 트레일링스탑) |
+| `core/order.py` | 주문 실행 (지정가매수·시장가매도) |
+| `core/logger.py` | 로거 (system.log, trades.csv, signals.csv) |
+| `core/trading_day.py` | 휴장일 판단 |
+| `core/universe_cache.py` | 유니버스 캐시 로드/저장 |
+| `core/naver_universe.py` | 네이버 시총 스크래핑 |
+| `core/naver_symbol_master.py` | 종목 마스터 |
+| `core/result_csv.py` | 일별 결과 CSV |
+| `main.py` | MoaRunner 전체 루프 |
+
+### ✅ Phase 2 — 완료 (커밋 `24dc660` ~ `73a1452`)
+
+#### Phase 2-1: KIS API 확장 (`core/api_client.py`)
+- `Quote` 데이터클래스에 `w52_high`, `w52_low` 필드 추가 (기존 코드 호환)
+- `SymbolHistory` 데이터클래스 신규 추가
+- `get_symbol_history(symbol, days=135)` — FHKST03010100으로 52주 고저가 + N일 OHLCV 단일 호출, 자동 페이징
+- `get_market_cap_list()` — KOSPI+KOSDAQ 시총 내림차순 리스트
+- `_safe_abs_int()` 헬퍼 추가
+
+#### Phase 2-2: 유니버스 빌더 (`core/universe_builder.py`)
+- 순수 함수 (독립 테스트 가능):
+  - `is_preferred_stock(symbol)` — 우선주 판별 (코드 끝자리 != 0)
+  - `is_etf_by_name(name)` — ETF 종목명 기반 판별
+  - `calc_vol_ma(bars, days=20)` — 평균 거래량
+  - `calc_w52_hit_count(bars, w52_high, lookback)` — 신고가 터치 횟수
+  - `calc_rs_return(bars, lookback=126)` — 6개월 수익률
+  - `compute_rs_top_pct(returns, top_pct)` — RS 상위 N% 필터
+  - `build_features(history, fresh_days, cont_days)` — CachedSymbol 피처 계산
+  - `apply_second_filter(features, strategy_mode, ...)` — 2차 필터
+- `UniverseBuilder` 클래스: 6단계 파이프라인
+  1. 시총 목록 수집 (KIS primary → Naver fallback)
+  2. 1차 필터 (시총·ETF·우선주)
+  3. 종목별 히스토리 수집 (KIS 배치)
+  4. RS 필터 (6개월 수익률 상위 10%)
+  5. 피처 계산 (w52_high, vol_ma20, w52_hit_60d, w52_hit_10d)
+  6. 2차 필터 (전략 모드별)
+- `naver_universe.py`에 `fetch_market_cap_list()` Naver fallback 추가
+
+#### Phase 2-3: main.py 연결
+- `prepare_universe()`에서 캐시 없을 때 `UniverseBuilder.build()` 자동 호출
+- 빌드 성공 시 `save_cache()` 저장, 실패 시 에러 로그 후 빈 목록으로 계속
+
+#### Phase 2-4: 배치 스크립트 (`scripts/build_universe.py`)
+- CLI: `python -m scripts.build_universe [--date YYYYMMDD] [--strategy 1|2] [--force]`
+- 캐시 존재 확인 → 종목 마스터 로드 → 빌드 → 저장 → 결과 출력
+
+**테스트 현황**: 총 **70개 통과** (api_client 13, universe_builder 38, 기타 19)
+
+### 🔴 Phase 3 — 미완료 (다음 작업 대상)
+
+#### 3-1. ETF 필터 보완
+- 현재: 종목 마스터(naver_symbol_master)가 있을 때만 ETF 이름 필터 동작
+- 목표: 종목 마스터 없어도 KIS API의 종목 타입 코드(`iscd_stat_cls_code`) 등으로 ETF 판별
+- 또는: `build_universe.py`가 항상 종목 마스터를 먼저 갱신하도록 강제
+
+#### 3-2. `korea_market_holidays.txt` 연도별 자동 관리
+- 현재: 2026년 평일 공휴일 목록 수동 관리
+- 목표: KIS `get_holiday_info()` 활용하여 휴장일 자동 갱신 스크립트 추가
+
+#### 3-3. 페이퍼 트레이딩 end-to-end 검증
+- `.env` 설정(모의투자 계정) 후 `build_universe.py` → `main.py` 실제 실행
+- 로그 파일 및 trades.csv 정상 기록 확인
+
+#### 3-4. `on_quote()` 거래량 skip 로직 개선
+- 현재: 거래량 미충족 시 `state.skip=True`로 **당일 영구 제외** → 오전에 거래량 부족해도 오후에 조건 충족 가능
+- 개선안: skip 대신 매 tick마다 거래량 재확인
+
+#### 3-5. 결과 분석 도구 검토
+- `scripts/build_result.py`의 `append_result1_rows` import — `result_csv.py` 내 해당 함수 존재 여부 확인 필요
+
+---
+
 ## 중요 메모
 - KIS 요청 제한을 피하기 위해 예수금 조회는 캐시를 사용합니다.
 - 네이버 스크래핑은 약 1~2분 걸릴 수 있습니다.
 - 상대강도 필터(6개월 수익률 배치)는 KIS API로 처리, 한계 시 네이버 증권 스크래핑으로 전환합니다.
 - `data/`는 기본적으로 git에 포함하지 않습니다 (로그·캐시·결과 파일 등).
+- `scripts/build_universe.py`는 장 시작 전(08:00~08:50 KST) 실행 권장. 전 종목 히스토리 수집에 약 2~5분 소요 예상.
