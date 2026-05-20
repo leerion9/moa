@@ -9,9 +9,11 @@ from zoneinfo import ZoneInfo
 from config.settings import settings
 from core.api_client import KISApiClient
 from core.logger import TradeLogger
+from core.naver_symbol_master import load_or_refresh_symbol_master
 from core.order import OrderManager
 from core.strategy import W52HighStrategy
 from core.trading_day import should_run_bot_today_kst
+from core.universe_builder import UniverseBuilder
 from core.universe_cache import (
     CachedSymbol,
     UniverseCache,
@@ -131,11 +133,34 @@ class MoaRunner:
                 f"유니버스 캐시 로드: {ucache_path.name} ({len(self.watchlist)}종목)"
             )
         else:
-            # Phase 2에서 실제 유니버스 빌더 구현
-            self.logger.info(
-                "유니버스 캐시 없음. 유니버스 빌더 미구현(Phase 2). 감시 목록 비어 있습니다."
-            )
-            self.watchlist = []
+            self.logger.info("유니버스 캐시 없음. 빌드 시작 ...")
+            try:
+                symbol_names = load_or_refresh_symbol_master(
+                    settings.symbol_master_path,
+                    auto_refresh=settings.symbol_master_auto_refresh,
+                    max_age_days=settings.symbol_master_max_age_days,
+                    delay_sec=settings.naver_http_delay_sec,
+                )
+                builder = UniverseBuilder(
+                    api=self.api,
+                    settings=settings,
+                    symbol_names=symbol_names,
+                )
+                new_cache = builder.build(now_kst=self._now_kst())
+                save_cache(ucache_path, new_cache)
+                self.watchlist = list(new_cache.symbols.keys())
+                for symbol, feat in new_cache.symbols.items():
+                    self.strategy.register(
+                        symbol=symbol,
+                        w52_high=feat.w52_high,
+                        vol_ma20=feat.vol_ma20,
+                    )
+                self.logger.info(
+                    f"유니버스 빌드 완료: {ucache_path.name} ({len(self.watchlist)}종목)"
+                )
+            except Exception as exc:
+                self.logger.error(f"유니버스 빌드 실패: {exc}. 감시 목록 비어 있습니다.")
+                self.watchlist = []
 
         self.logger.info(
             f"감시 준비 완료. 종목={len(self.watchlist)}개 "
