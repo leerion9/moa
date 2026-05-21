@@ -20,6 +20,8 @@ class Settings:
     account_prdt_cd: str = os.getenv("ACCOUNT_PRDT_CD", "01")
 
     is_paper_trading: bool = os.getenv("IS_PAPER_TRADING", "true").lower() == "true"
+    # 완전 시뮬레이션 모드: KIS 주문 API 미호출, 가상 1주 체결로 기록
+    sim_mode: bool = os.getenv("SIM_MODE", "true").lower() == "true"
     base_url_paper: str = os.getenv(
         "BASE_URL_PAPER", "https://openapivts.koreainvestment.com:29443"
     )
@@ -104,6 +106,10 @@ class Settings:
     @property
     def result_csv_path(self) -> Path:
         return self.log_dir / "result.csv"
+
+    @property
+    def result_xlsx_path(self) -> Path:
+        return self.log_dir / "result.xlsx"
 
     @property
     def cano(self) -> str:

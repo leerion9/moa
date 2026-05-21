@@ -41,6 +41,9 @@ class MoaRunner:
         self.ordered_symbols_today: set[str] = set()
         self.buy_orders_today: int = 0
 
+        # 가상 매매 기록 (sim_mode=True 일 때)
+        self._paper_trades: List[Dict] = []
+
         # 09:00 현금 스냅샷
         self.cash_snapshot_total: Optional[int] = None
         self.per_symbol_budget: Optional[int] = None
@@ -99,7 +102,7 @@ class MoaRunner:
 
         if hhmm >= settings.shutdown_hhmm:
             if self._did_result_csv_ymd != ymd:
-                self._write_daily_result_csv(ymd)
+                self._write_daily_result(ymd)
                 self._did_result_csv_ymd = ymd
             self._should_stop = True
             return
@@ -182,14 +185,17 @@ class MoaRunner:
             self._maybe_heartbeat(f"감시대상 없음. now={hhmm} KST")
             return
 
-        if not self._ensure_cash_snapshot():
-            return
+        # 실매매 모드: 현금 스냅샷 필요 / 시뮬 모드: 스킵
+        budget = 0
+        if not settings.sim_mode:
+            if not self._ensure_cash_snapshot():
+                return
+            budget = int(self.per_symbol_budget or 0)
+            if budget <= 0:
+                self.logger.error("per_symbol_budget 이상. 감시만 진행합니다.")
+                return
 
         can_buy = self.buy_orders_today < settings.max_positions
-        budget = int(self.per_symbol_budget or 0)
-        if budget <= 0:
-            self.logger.error("per_symbol_budget 이상. 감시만 진행합니다.")
-            return
 
         self._hb_cycles += 1
         for symbol in self.strategy.watchlist_symbols():
@@ -215,14 +221,16 @@ class MoaRunner:
                 "symbol": symbol,
                 "breakout_price": signal.entry_price,
                 "reason": signal.reason,
-                "action": "SKIP_FULL_CAP" if not can_buy else "BUY_ATTEMPT",
+                "action": "SKIP_FULL_CAP" if not can_buy else (
+                    "SIM_BUY" if settings.sim_mode else "BUY_ATTEMPT"
+                ),
                 "note": "",
             })
 
             if not can_buy:
                 continue
 
-            if signal.entry_price > budget:
+            if not settings.sim_mode and signal.entry_price > budget:
                 self.logger.log_signal({
                     "symbol": symbol,
                     "breakout_price": signal.entry_price,
@@ -232,24 +240,29 @@ class MoaRunner:
                 })
                 continue
 
-            try:
-                result = self.order.place_breakout_buy_with_budget(
-                    symbol=symbol,
-                    per_symbol_budget=budget,
-                    breakout_price=signal.entry_price,
+            if settings.sim_mode:
+                qty = 1
+                ord_no = "SIM"
+            else:
+                try:
+                    result = self.order.place_breakout_buy_with_budget(
+                        symbol=symbol,
+                        per_symbol_budget=budget,
+                        breakout_price=signal.entry_price,
+                    )
+                except Exception as exc:
+                    self.logger.error(f"BUY 실패 {symbol}: {exc}")
+                    continue
+
+                ord_no = str(result.get("ord_no", "") or "")
+                if not ord_no:
+                    self.logger.error(f"BUY ACK ord_no 없음: {symbol}. 미계수.")
+                    continue
+
+                qty = self.order.calc_buy_qty_with_budget(
+                    per_symbol_budget=budget, breakout_price=signal.entry_price
                 )
-            except Exception as exc:
-                self.logger.error(f"BUY 실패 {symbol}: {exc}")
-                continue
 
-            ord_no = str(result.get("ord_no", "") or "")
-            if not ord_no:
-                self.logger.error(f"BUY ACK ord_no 없음: {symbol}. 미계수.")
-                continue
-
-            qty = self.order.calc_buy_qty_with_budget(
-                per_symbol_budget=budget, breakout_price=signal.entry_price
-            )
             self.strategy.register_position(
                 symbol=symbol, buy_price=signal.entry_price, qty=qty
             )
@@ -257,6 +270,15 @@ class MoaRunner:
             self.buy_orders_today += 1
             if symbol not in self.positions:
                 self.positions.append(symbol)
+
+            if settings.sim_mode:
+                self._paper_trades.append({
+                    "ts": self._now_kst(),
+                    "side": "BUY",
+                    "symbol": symbol,
+                    "qty": qty,
+                    "price": signal.entry_price,
+                })
 
             self.logger.log_trade({
                 "symbol": symbol,
@@ -273,8 +295,10 @@ class MoaRunner:
                 "balance_json": "",
                 "pnl_cash_delta": "",
             })
+            label = "가상매수" if settings.sim_mode else "매수"
             self.logger.info(
-                f"[매수] {symbol} price={signal.entry_price} qty={qty} ord_no={ord_no}"
+                f"[{label}] {symbol} price={signal.entry_price} qty={qty}"
+                + (f" ord_no={ord_no}" if not settings.sim_mode else "")
             )
             self._hb_buys += 1
             if self.buy_orders_today >= settings.max_positions:
@@ -304,13 +328,23 @@ class MoaRunner:
             if sell_signal is None:
                 continue
 
-            try:
-                result = self.api.place_market_sell(symbol=symbol, qty=sell_signal.qty)
-            except Exception as exc:
-                self.logger.error(f"SELL 실패 {symbol}: {exc}")
-                continue
+            if settings.sim_mode:
+                ord_no = "SIM"
+                self._paper_trades.append({
+                    "ts": self._now_kst(),
+                    "side": "SELL",
+                    "symbol": symbol,
+                    "qty": sell_signal.qty,
+                    "price": quote.current_price,
+                })
+            else:
+                try:
+                    result = self.api.place_market_sell(symbol=symbol, qty=sell_signal.qty)
+                except Exception as exc:
+                    self.logger.error(f"SELL 실패 {symbol}: {exc}")
+                    continue
+                ord_no = str(result.get("ord_no", "") or "")
 
-            ord_no = str(result.get("ord_no", "") or "")
             self.logger.log_trade({
                 "symbol": symbol,
                 "side": "SELL",
@@ -326,9 +360,11 @@ class MoaRunner:
                 "balance_json": "",
                 "pnl_cash_delta": "",
             })
+            label = "가상매도" if settings.sim_mode else "매도"
             self.logger.info(
-                f"[매도] {symbol} price={quote.current_price} "
-                f"qty={sell_signal.qty} reason={sell_signal.reason} ord_no={ord_no}"
+                f"[{label}] {symbol} price={quote.current_price} "
+                f"qty={sell_signal.qty} reason={sell_signal.reason}"
+                + (f" ord_no={ord_no}" if not settings.sim_mode else "")
             )
             if symbol in self.positions:
                 self.positions.remove(symbol)
@@ -383,24 +419,27 @@ class MoaRunner:
         self._hb_buys = 0
         self._hb_quote_err = 0
 
-    def _write_daily_result_csv(self, ymd: str) -> None:
+    def _write_daily_result(self, ymd: str) -> None:
         if not settings.result_csv_on_shutdown:
             return
         try:
             from datetime import timedelta
             from core.naver_symbol_master import load_or_refresh_symbol_master
-            from core.result_csv import (
-                append_result_rows,
-                build_daily_rows_from_kis_range,
-                kis_rows_to_execs,
-                kis_rows_to_symbol_names,
-            )
+            from core.result_csv import build_daily_rows_from_kis_range
+            from core.result_xlsx import append_result_xlsx_rows, paper_trades_to_execs
 
-            lookback = max(1, min(90, settings.result_csv_kis_lookback_days))
-            end_dt = datetime.strptime(ymd, "%Y%m%d").replace(tzinfo=ZoneInfo("Asia/Seoul"))
-            start_ymd = (end_dt - timedelta(days=lookback)).strftime("%Y%m%d")
-            kis_rows = self.api.get_daily_order_executions(start_ymd, ymd)
-            execs = kis_rows_to_execs(kis_rows)
+            if settings.sim_mode:
+                execs = paper_trades_to_execs(self._paper_trades)
+                kis_names: dict = {}
+            else:
+                from core.result_csv import kis_rows_to_execs, kis_rows_to_symbol_names
+                lookback = max(1, min(90, settings.result_csv_kis_lookback_days))
+                end_dt = datetime.strptime(ymd, "%Y%m%d").replace(tzinfo=ZoneInfo("Asia/Seoul"))
+                start_ymd = (end_dt - timedelta(days=lookback)).strftime("%Y%m%d")
+                kis_rows = self.api.get_daily_order_executions(start_ymd, ymd)
+                execs = kis_rows_to_execs(kis_rows)
+                kis_names = kis_rows_to_symbol_names(kis_rows)
+
             daily_rows = build_daily_rows_from_kis_range(execs, ymd)
             names = load_or_refresh_symbol_master(
                 settings.symbol_master_path,
@@ -408,13 +447,14 @@ class MoaRunner:
                 max_age_days=settings.symbol_master_max_age_days,
                 delay_sec=settings.naver_http_delay_sec,
             )
-            kis_names = kis_rows_to_symbol_names(kis_rows)
-            append_result_rows(
-                settings.result_csv_path, daily_rows, names, kis_symbol_names=kis_names
+            append_result_xlsx_rows(
+                settings.result_xlsx_path, daily_rows, names,
+                kis_symbol_names=kis_names,
+                strategy_mode=settings.strategy_mode,
             )
-            self.logger.info(f"result.csv 갱신: {ymd} ({len(daily_rows)}건)")
+            self.logger.info(f"result.xlsx 갱신: {ymd} ({len(daily_rows)}건)")
         except Exception as exc:
-            self.logger.error(f"result.csv 실패: {exc}")
+            self.logger.error(f"result.xlsx 실패: {exc}")
 
     @staticmethod
     def _configure_console_utf8() -> None:

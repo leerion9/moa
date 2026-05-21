@@ -4,3 +4,4 @@ pandas
 schedule
 pytest
 beautifulsoup4
+openpyxl
