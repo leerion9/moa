@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from types import SimpleNamespace
-from typing import Dict, List
+from typing import Dict, List, Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -323,6 +324,30 @@ def _make_api_mock(cap_list=None, history_map=None):
     return mock
 
 
+@contextmanager
+def _patch_naver(cap_list=None, history_map=None, cap_names=None):
+    """UniverseBuilder의 Naver 메서드를 테스트용으로 패치.
+
+    cap_list:    Naver 시총 목록으로 반환할 [(symbol, cap), ...] 리스트.
+    history_map: symbol → SymbolHistory 매핑 (Naver 히스토리 mock).
+    cap_names:   Naver 시총 수집 시 얻는 {symbol: name} (ETF 필터 fallback 테스트용).
+    """
+    def _naver_cap(self_ub):
+        if cap_names:
+            for sym, name in cap_names.items():
+                self_ub._cap_list_names[sym] = name
+        return list(cap_list or [])
+
+    def _naver_hist(self_ub, symbol, session):
+        if history_map:
+            return history_map.get(symbol)
+        return None
+
+    with patch.object(UniverseBuilder, "_fetch_cap_list_naver", _naver_cap):
+        with patch.object(UniverseBuilder, "_fetch_history_naver", _naver_hist):
+            yield
+
+
 def test_builder_basic_strategy1():
     """정상적인 strategy1 빌드 테스트."""
     settings = _make_settings(strategy_mode=1, rs_top_pct=1.0)  # RS 필터 전체 통과
@@ -338,13 +363,12 @@ def test_builder_basic_strategy1():
         ]
         return SymbolHistory(symbol=symbol, w52_high=10000, w52_low=7000, bars=bars)
 
-    api = _make_api_mock(
-        cap_list=cap_list,
-        history_map={s: _make_hist(s) for s, _ in cap_list},
-    )
+    history_map = {s: _make_hist(s) for s, _ in cap_list}
+    api = _make_api_mock()
 
-    builder = UniverseBuilder(api=api, settings=settings)
-    cache = builder.build()
+    with _patch_naver(cap_list=cap_list, history_map=history_map):
+        builder = UniverseBuilder(api=api, settings=settings)
+        cache = builder.build()
 
     assert cache.strategy_mode == 1
     assert len(cache.symbols) == 3  # 전부 w52_hit_60d=0 → 통과
@@ -367,16 +391,15 @@ def test_builder_strategy1_filters_recent_hits():
         ]
         return SymbolHistory(symbol=symbol, w52_high=10000, w52_low=7000, bars=bars)
 
-    api = _make_api_mock(
-        cap_list=cap_list,
-        history_map={
-            "005930": _make_hist("005930", high_val=9500),   # high < w52_high → hit=0 → 통과
-            "000660": _make_hist("000660", high_val=10000),  # high == w52_high → hit=60 → 제외
-        },
-    )
+    history_map = {
+        "005930": _make_hist("005930", high_val=9500),   # high < w52_high → hit=0 → 통과
+        "000660": _make_hist("000660", high_val=10000),  # high == w52_high → hit=60 → 제외
+    }
+    api = _make_api_mock()
 
-    builder = UniverseBuilder(api=api, settings=settings)
-    cache = builder.build()
+    with _patch_naver(cap_list=cap_list, history_map=history_map):
+        builder = UniverseBuilder(api=api, settings=settings)
+        cache = builder.build()
 
     assert "005930" in cache.symbols
     assert "000660" not in cache.symbols
@@ -389,7 +412,6 @@ def test_builder_strategy2():
     cap_list = [("005930", 4_000_000), ("000660", 1_000_000)]
 
     def _make_hist(symbol, hit_count_in_first10):
-        # 최초 hit_count_in_first10개 bar는 high>=w52_high, 나머지는 미달
         bars = []
         for i in range(130):
             high = 10000 if i < hit_count_in_first10 else 9000
@@ -399,16 +421,15 @@ def test_builder_strategy2():
             })
         return SymbolHistory(symbol=symbol, w52_high=10000, w52_low=7000, bars=bars)
 
-    api = _make_api_mock(
-        cap_list=cap_list,
-        history_map={
-            "005930": _make_hist("005930", hit_count_in_first10=5),  # 통과
-            "000660": _make_hist("000660", hit_count_in_first10=4),  # 미달 → 제외
-        },
-    )
+    history_map = {
+        "005930": _make_hist("005930", hit_count_in_first10=5),  # 통과
+        "000660": _make_hist("000660", hit_count_in_first10=4),  # 미달 → 제외
+    }
+    api = _make_api_mock()
 
-    builder = UniverseBuilder(api=api, settings=settings)
-    cache = builder.build()
+    with _patch_naver(cap_list=cap_list, history_map=history_map):
+        builder = UniverseBuilder(api=api, settings=settings)
+        cache = builder.build()
 
     assert "005930" in cache.symbols
     assert "000660" not in cache.symbols
@@ -428,13 +449,12 @@ def test_builder_preferred_stock_excluded():
         ]
         return SymbolHistory(symbol=symbol, w52_high=10000, w52_low=7000, bars=bars)
 
-    api = _make_api_mock(
-        cap_list=cap_list,
-        history_map={s: _make_hist(s) for s, _ in cap_list},
-    )
+    history_map = {s: _make_hist(s) for s, _ in cap_list}
+    api = _make_api_mock()
 
-    builder = UniverseBuilder(api=api, settings=settings)
-    cache = builder.build()
+    with _patch_naver(cap_list=cap_list, history_map=history_map):
+        builder = UniverseBuilder(api=api, settings=settings)
+        cache = builder.build()
 
     assert "005930" in cache.symbols
     assert "005935" not in cache.symbols
@@ -454,13 +474,12 @@ def test_builder_market_cap_filter():
         ]
         return SymbolHistory(symbol=symbol, w52_high=10000, w52_low=7000, bars=bars)
 
-    api = _make_api_mock(
-        cap_list=cap_list,
-        history_map={"005930": _make_hist("005930")},
-    )
+    history_map = {"005930": _make_hist("005930")}
+    api = _make_api_mock()
 
-    builder = UniverseBuilder(api=api, settings=settings)
-    cache = builder.build()
+    with _patch_naver(cap_list=cap_list, history_map=history_map):
+        builder = UniverseBuilder(api=api, settings=settings)
+        cache = builder.build()
 
     assert "005930" in cache.symbols
     assert "000001" not in cache.symbols
@@ -470,49 +489,34 @@ def test_builder_rs_filter():
     """RS 상위 10%만 통과하는지 확인."""
     settings = _make_settings(strategy_mode=1, rs_top_pct=0.5)  # 상위 50%
 
-    # 4개 종목, 2개만 통과해야 함
     cap_list = [(f"00{i:04d}", 1_000_000) for i in range(4)]
-    preferred = set()
-    for s, _ in cap_list:
-        if is_preferred_stock(s):
-            preferred.add(s)
-
     base_closes = [10000, 9000, 8000, 7000]  # 종목별 현재가 (높을수록 RS 좋음)
 
     def _make_hist(symbol, idx):
-        # bars[0].close = base_closes[idx], bars[RS_LOOKBACK_DAYS].close = 10000
         close_now = base_closes[idx]
         bars = [{"date": f"202601{i + 1:02d}", "open": 9000, "high": close_now + 100,
                  "low": 8000, "close": close_now, "volume": 200_000}
                 for i in range(RS_LOOKBACK_DAYS + 5)]
-        # RS_LOOKBACK_DAYS번째(126번) bar의 close를 10000으로 고정
         bars[RS_LOOKBACK_DAYS] = {**bars[RS_LOOKBACK_DAYS], "close": 10000}
         return SymbolHistory(symbol=symbol, w52_high=close_now + 200, w52_low=5000, bars=bars)
 
-    api = _make_api_mock(
-        cap_list=cap_list,
-        history_map={s: _make_hist(s, i) for i, (s, _) in enumerate(cap_list)},
-    )
+    history_map = {s: _make_hist(s, i) for i, (s, _) in enumerate(cap_list)}
+    api = _make_api_mock()
 
-    builder = UniverseBuilder(api=api, settings=settings)
-    cache = builder.build()
+    with _patch_naver(cap_list=cap_list, history_map=history_map):
+        builder = UniverseBuilder(api=api, settings=settings)
+        cache = builder.build()
 
-    # 상위 50% = 2종목 통과
-    # 단, 우선주 등 필터로 제거된 건 제외해야 함 (여기서는 코드 확인)
-    # 코드가 모두 보통주이고 w52_hit_60d=0이라면 2개 통과
+    # 상위 50% = 2종목 통과 (보통주이고 w52_hit_60d=0)
     assert len(cache.symbols) <= 2
 
 
 def test_builder_empty_cap_list_returns_empty_cache():
-    """시총 목록이 비어 있으면 빈 캐시 반환."""
+    """Naver·KIS 모두 빈 시총 목록이면 빈 캐시 반환."""
     settings = _make_settings(strategy_mode=1)
     api = _make_api_mock(cap_list=[])
 
-    with patch.object(
-        UniverseBuilder,
-        "_fetch_cap_list_naver",
-        return_value=[],
-    ):
+    with _patch_naver(cap_list=[]):
         builder = UniverseBuilder(api=api, settings=settings)
         cache = builder.build()
 
@@ -535,23 +539,24 @@ def test_builder_etf_excluded_by_name():
         ]
         return SymbolHistory(symbol=symbol, w52_high=10000, w52_low=7000, bars=bars)
 
-    api = _make_api_mock(
-        cap_list=cap_list,
-        history_map={"005930": _make_hist("005930")},
-    )
+    history_map = {"005930": _make_hist("005930")}
+    api = _make_api_mock()
 
-    builder = UniverseBuilder(api=api, settings=settings, symbol_names=symbol_names)
-    cache = builder.build()
+    with _patch_naver(cap_list=cap_list, history_map=history_map):
+        builder = UniverseBuilder(api=api, settings=settings, symbol_names=symbol_names)
+        cache = builder.build()
 
     assert "069500" not in cache.symbols  # ETF 제외
     assert "005930" in cache.symbols
 
 
 def test_builder_etf_excluded_by_cap_list_names_fallback():
-    """symbol_names 없어도 _cap_list_names(시총 API 이름) fallback으로 ETF 필터 동작."""
+    """symbol_names 없어도 Naver 시총 수집 시 얻은 _cap_list_names로 ETF 필터 동작."""
     settings = _make_settings(strategy_mode=1, rs_top_pct=1.0, include_etf=False)
 
     cap_list = [("069500", 5_000_000), ("005930", 4_000_000)]
+    # Naver 시총 수집 시 종목명도 함께 넘어옴
+    cap_names = {"069500": "KODEX 200", "005930": "삼성전자"}
 
     def _make_hist(symbol):
         bars = [
@@ -561,18 +566,14 @@ def test_builder_etf_excluded_by_cap_list_names_fallback():
         ]
         return SymbolHistory(symbol=symbol, w52_high=10000, w52_low=7000, bars=bars)
 
-    api = _make_api_mock(
-        cap_list=cap_list,
-        history_map={"005930": _make_hist("005930")},
-    )
-    # KIS API가 종목명을 돌려줬다고 가정 (side-channel)
-    api._last_cap_list_names = {"069500": "KODEX 200", "005930": "삼성전자"}
+    history_map = {"005930": _make_hist("005930")}
+    api = _make_api_mock()
 
-    # symbol_names 없이 생성
-    builder = UniverseBuilder(api=api, settings=settings)
-    cache = builder.build()
+    with _patch_naver(cap_list=cap_list, history_map=history_map, cap_names=cap_names):
+        builder = UniverseBuilder(api=api, settings=settings)  # symbol_names 없음
+        cache = builder.build()
 
-    assert "069500" not in cache.symbols  # cap_list_names fallback으로 ETF 제외
+    assert "069500" not in cache.symbols  # _cap_list_names fallback으로 ETF 제외
     assert "005930" in cache.symbols
 
 
@@ -584,7 +585,7 @@ def test_builder_cache_metadata():
     settings = _make_settings(strategy_mode=2)
     api = _make_api_mock(cap_list=[])
 
-    with patch.object(UniverseBuilder, "_fetch_cap_list_naver", return_value=[]):
+    with _patch_naver(cap_list=[]):
         builder = UniverseBuilder(api=api, settings=settings)
         now = datetime(2026, 5, 20, 8, 30, 0, tzinfo=ZoneInfo("Asia/Seoul"))
         cache = builder.build(now_kst=now)

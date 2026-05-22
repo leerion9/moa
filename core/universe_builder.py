@@ -2,9 +2,9 @@
 Universe builder: 장 시작 전 배치로 당일 감시 목록(UniverseCache)을 생성한다.
 
 Pipeline:
-  1. 시총 목록 수집 (KIS primary → Naver fallback)
+  1. 시총 목록 수집 (Naver primary → KIS fallback)
   2. 1차 필터: 시총, ETF, 우선주
-  3. 종목별 히스토리 수집 (KIS FHKST03010100)
+  3. 종목별 히스토리 수집 (Naver primary → KIS fallback)
   4. RS 필터: 6개월 수익률 상위 10%
   5. 피처 계산: w52_high, vol_ma20, w52_hit_60d, w52_hit_10d
   6. 2차 필터: 전략 모드별 조건
@@ -17,6 +17,8 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
+import requests
+
 from config.settings import Settings
 from core.api_client import KISApiClient, SymbolHistory
 from core.universe_cache import CachedSymbol, UniverseCache
@@ -24,7 +26,8 @@ from core.universe_cache import CachedSymbol, UniverseCache
 _log = logging.getLogger("moa")
 
 RS_LOOKBACK_DAYS = 126   # 6개월 거래일 수 (대략)
-HISTORY_DAYS = 135       # RS 계산 버퍼 포함 (126 + 여유 9일)
+HISTORY_DAYS = 135       # KIS fallback용 (126 + 여유 9일)
+NAVER_HISTORY_PAGES = 30 # Naver primary용: 30페이지 × 10행 = 300봉 ≈ 1.2년 (52주 고가 커버)
 
 _ETF_NAME_PREFIXES: Tuple[str, ...] = (
     "KODEX", "TIGER", "KBSTAR", "HANARO", "ARIRANG", "TREX",
@@ -184,6 +187,8 @@ class UniverseBuilder:
         self.symbol_names: Dict[str, str] = symbol_names or {}
         # _cap_list_names: 시총 목록 수집 시 부산물로 얻은 종목명 (ETF 이름 필터 fallback).
         self._cap_list_names: Dict[str, str] = {}
+        # Naver HTTP 세션 (lazy init, 히스토리 수집 전체에 재사용).
+        self._naver_session: Optional[requests.Session] = None
 
     # ------------------------------------------------------------------
     # Public
@@ -239,35 +244,37 @@ class UniverseBuilder:
     # ------------------------------------------------------------------
 
     def _fetch_cap_list(self) -> List[Tuple[str, int]]:
-        """KIS 시총 목록 조회. 부족하면 Naver fallback.
+        """시총 목록 조회. Naver primary → KIS fallback.
 
         부산물로 self._cap_list_names({symbol: name})를 갱신해
         symbol_names가 없을 때 ETF 이름 필터 fallback으로 사용한다.
         """
-        result: List[Tuple[str, int]] = []
+        result = self._fetch_cap_list_naver()
+        if result:
+            return result
+
+        # KIS fallback (Naver 실패 시)
+        _log.info("[UB] Naver 시총 없음. KIS fallback 시도")
         try:
             result = self.api.get_market_cap_list()
             self._cap_list_names = dict(getattr(self.api, "_last_cap_list_names", {}))
+            return result
         except Exception as exc:
-            _log.warning("[UB] KIS 시총 조회 실패(%s). Naver fallback 시도", exc)
-
-        if len(result) < 50:
-            _log.info("[UB] KIS 시총 목록 부족(%d건). Naver fallback 시도", len(result))
-            result = self._fetch_cap_list_naver()
-
-        return result
+            _log.warning("[UB] KIS 시총 조회도 실패: %s", exc)
+            return []
 
     def _fetch_cap_list_naver(self) -> List[Tuple[str, int]]:
-        """Naver 시총 페이지에서 (symbol, cap_억원) 수집."""
+        """Naver 시총 페이지에서 (symbol, cap_억원) 수집.
+        실패(네트워크·파싱 오류) 시 [] 반환.
+        """
         try:
             from core.naver_universe import fetch_market_cap_list as naver_cap
             cap_list, naver_names = naver_cap(delay_sec=self.settings.naver_http_delay_sec)
-            # Naver 이름을 KIS 이름으로 이미 채워진 경우 덮어쓰지 않음
             for sym, name in naver_names.items():
                 self._cap_list_names.setdefault(sym, name)
             return cap_list
         except Exception as exc:
-            _log.error("[UB] Naver 시총 fallback 실패: %s", exc)
+            _log.warning("[UB] Naver 시총 조회 실패: %s", exc)
             return []
 
     def _apply_first_filter(self, cap_list: List[Tuple[str, int]]) -> List[str]:
@@ -304,21 +311,56 @@ class UniverseBuilder:
         )
         return result
 
+    def _get_naver_session(self) -> requests.Session:
+        """Naver HTTP 세션 lazy init (히스토리 수집 전체에 재사용)."""
+        if self._naver_session is None:
+            from core.naver_universe import _UA
+            self._naver_session = requests.Session()
+            self._naver_session.headers.update(_UA)
+        return self._naver_session
+
+    def _fetch_history_naver(
+        self,
+        symbol: str,
+        session: requests.Session,
+    ) -> Optional[SymbolHistory]:
+        """Naver sise_day에서 히스토리 조회. 실패 시 None."""
+        try:
+            from core.naver_universe import fetch_symbol_history_naver
+            return fetch_symbol_history_naver(  # type: ignore[return-value]
+                symbol=symbol,
+                pages=NAVER_HISTORY_PAGES,
+                delay_sec=self.settings.naver_http_delay_sec,
+                session=session,
+            )
+        except Exception as exc:
+            _log.debug("[UB] Naver 히스토리 실패 %s: %s", symbol, exc)
+            return None
+
     def _fetch_histories(self, symbols: List[str]) -> Dict[str, SymbolHistory]:
-        """각 종목 히스토리(N일 OHLCV + 52주 고저가) 일괄 수집."""
+        """각 종목 히스토리(OHLCV + 52주 고저가) 일괄 수집.
+        Naver primary → 종목별 KIS fallback.
+        """
         histories: Dict[str, SymbolHistory] = {}
         total = len(symbols)
         log_every = max(1, total // 10)
+        session = self._get_naver_session()
 
         for idx, symbol in enumerate(symbols):
             if idx % log_every == 0:
                 _log.info("[UB] 히스토리 수집 %d/%d …", idx, total)
-            try:
-                hist = self.api.get_symbol_history(symbol, days=HISTORY_DAYS)
-                if hist.bars:
-                    histories[symbol] = hist
-            except Exception as exc:
-                _log.debug("[UB] 히스토리 실패 %s: %s", symbol, exc)
+
+            hist: Optional[SymbolHistory] = self._fetch_history_naver(symbol, session)
+
+            if hist is None:
+                try:
+                    kis = self.api.get_symbol_history(symbol, days=HISTORY_DAYS)
+                    hist = kis if kis.bars else None
+                except Exception as exc:
+                    _log.debug("[UB] KIS 히스토리 실패 %s: %s", symbol, exc)
+
+            if hist is not None:
+                histories[symbol] = hist
 
         return histories
 

@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 import re
 import time
-from typing import Dict, List, Tuple, TypedDict
+from typing import Dict, List, Optional, Tuple, TypedDict
 
 import requests
 from bs4 import BeautifulSoup
@@ -110,11 +110,9 @@ def _fetch_ranked_symbols_merged(session: requests.Session, delay_sec: float) ->
     return ordered
 
 
-def _fetch_daily_bars(session: requests.Session, symbol: str) -> List[DailyBar]:
-    resp = session.get(_DAY_URL, params={"code": symbol, "page": 1}, timeout=15)
-    resp.encoding = "euc-kr"
-    resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "html.parser")
+def _parse_daily_bars_html(html: str) -> List[DailyBar]:
+    """HTML에서 DailyBar 목록 파싱 (naver sise_day.naver 기준)."""
+    soup = BeautifulSoup(html, "html.parser")
     table = soup.select_one("table.type2")
     if not table:
         return []
@@ -150,6 +148,71 @@ def _fetch_daily_bars(session: requests.Session, symbol: str) -> List[DailyBar]:
             }
         )
     return bars
+
+
+def _fetch_daily_bars(session: requests.Session, symbol: str) -> List[DailyBar]:
+    """page=1 단일 페이지 일봉 조회."""
+    resp = session.get(_DAY_URL, params={"code": symbol, "page": 1}, timeout=15)
+    resp.encoding = "euc-kr"
+    resp.raise_for_status()
+    return _parse_daily_bars_html(resp.text)
+
+
+def fetch_symbol_history_naver(
+    symbol: str,
+    pages: int,
+    delay_sec: float,
+    session: Optional[requests.Session] = None,
+) -> "Optional[object]":
+    """
+    Naver sise_day에서 pages 페이지 분량의 일봉을 수집해 SymbolHistory 반환.
+
+    w52_high: 전체 bars 중 최고 high (52주 고가 근사값)
+    w52_low:  전체 bars 중 최저 low
+    bars:     최신순 OHLCV dict 리스트
+    실패(빈 응답·네트워크 오류) 시 None 반환.
+    """
+    from core.api_client import SymbolHistory  # local import — circular 방지
+
+    own_session = session is None
+    if own_session:
+        s: requests.Session = requests.Session()
+        s.headers.update(_UA)
+    else:
+        s = session  # type: ignore[assignment]
+
+    all_bars: List[DailyBar] = []
+    for page in range(1, pages + 1):
+        try:
+            resp = s.get(_DAY_URL, params={"code": symbol, "page": page}, timeout=15)
+            resp.encoding = "euc-kr"
+            resp.raise_for_status()
+            page_bars = _parse_daily_bars_html(resp.text)
+            if not page_bars:
+                break
+            all_bars.extend(page_bars)
+            if page < pages:
+                time.sleep(delay_sec)
+        except Exception:
+            break
+
+    if not all_bars:
+        return None
+
+    w52_high = max(b["high"] for b in all_bars)
+    w52_low = min(b["low"] for b in all_bars)
+    bar_dicts = [
+        {
+            "date": b["date"],
+            "open": b["open"],
+            "high": b["high"],
+            "low": b["low"],
+            "close": b["close"],
+            "volume": b["volume"],
+        }
+        for b in all_bars
+    ]
+    return SymbolHistory(symbol=symbol, w52_high=w52_high, w52_low=w52_low, bars=bar_dicts)
 
 
 def build_naver_universe(top_ratio: float, delay_sec: float) -> Tuple[List[str], Dict[str, int]]:

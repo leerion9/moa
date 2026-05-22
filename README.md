@@ -152,13 +152,13 @@ python -m pytest -q
   - `build_features(history, fresh_days, cont_days)` — CachedSymbol 피처 계산
   - `apply_second_filter(features, strategy_mode, ...)` — 2차 필터
 - `UniverseBuilder` 클래스: 6단계 파이프라인
-  1. 시총 목록 수집 (KIS primary → Naver fallback)
+  1. 시총 목록 수집 (**Naver primary → KIS fallback**)
   2. 1차 필터 (시총·ETF·우선주)
-  3. 종목별 히스토리 수집 (KIS 배치)
+  3. 종목별 히스토리 수집 (**Naver primary** 30페이지 × 10봉 ≈ 300봉/종목 → KIS fallback)
   4. RS 필터 (6개월 수익률 상위 10%)
   5. 피처 계산 (w52_high, vol_ma20, w52_hit_60d, w52_hit_10d)
   6. 2차 필터 (전략 모드별)
-- `naver_universe.py`에 `fetch_market_cap_list()` Naver fallback 추가
+- `naver_universe.py`에 `fetch_market_cap_list()` 및 `fetch_symbol_history_naver()` 추가
 
 #### Phase 2-3: main.py 연결
 - `prepare_universe()`에서 캐시 없을 때 `UniverseBuilder.build()` 자동 호출
