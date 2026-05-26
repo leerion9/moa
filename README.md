@@ -95,8 +95,11 @@ APP_KEY=...
 APP_SECRET=...
 ACCOUNT_NO=12345678-01
 IS_PAPER_TRADING=true
+SIM_MODE=true           # 현재: live API + 가상주문. 실매매 전환 시 false
 STRATEGY_MODE=1         # 1=최초돌파, 2=추세지속
 TRAILING_STOP_PCT=0.075
+RESULT_WRITE_HHMM=15:32 # 장 종료 후 result.xlsx 기록
+SHUTDOWN_HHMM=15:40     # 봇 종료
 ```
 
 ## 실행
@@ -260,21 +263,28 @@ python -m pytest -q
 - **영향**: 전략2 감시 목록 별도 생성·동시 매수 불가. 같은 날짜 캐시를 덮어쓰는 구조.
 - **목표 (예정)**: 전략1·2 유니버스 **각각** 생성·캐시·감시. 조건 충족 시 **각 전략별** 지정가 매수.
 
-**이슈 3 — result.xlsx 미생성 (15:40 전 프로세스 종료)**
+**이슈 3 — result.xlsx 미생성 (15:40 전 프로세스 종료)** ✅ (2026-05-26 수정)
 
-- **원인**: `result.xlsx`는 `SHUTDOWN_HHMM`(15:40) 도달 시 `_write_daily_result()`에서만 기록.
-- **5/26**: 마지막 로그 15:35 `대기중` → `moa stopped.` / `result.xlsx 갱신` 로그 없음 → **비정상 종료** (Ctrl+C, 창 닫기, PC 절전 등 추정).
-- **개선 방향 (예정)**:
-  - 매수/매도 직후 result 중간 저장 또는 shutdown 외 저장 트리거
-  - 종료 시 result 저장 보장 (atexit / finally)
+- **원인**: `result.xlsx`가 `SHUTDOWN_HHMM`(15:40)과 묶여 있었음. PC 자동 종료(15:40)와 겹치면 저장 전 종료.
+- **수정**: `RESULT_WRITE_HHMM=15:32` — 장 종료(15:30) 2분 후 result 기록, `SHUTDOWN_HHMM`(15:40)은 봇 종료만 담당.
+- **파일**: `config/settings.py`, `main.py`, `.env.example`
 
-**이슈 4 — `mode=live`와 `SIM_MODE` 혼동**
+**이슈 4 — `mode=live`와 `SIM_MODE` 혼동** (운영 메모만, 코드 작업 보류)
 
 - **두 설정은 별개**:
   - `IS_PAPER_TRADING=false` → `mode=live` (KIS **실계좌 API**로 시세·잔고 조회)
   - `SIM_MODE=true` (기본값) → **주문 API 미호출**, 1주 체결 **가정** 후 로그/CSV만 기록 (`order_id=SIM`, `[가상매수]`)
-- **5/26 상태**: 실계좌 API + SIM 주문 (시세는 live, 주문은 가상).
-- **실제 KIS 주문**을 내려면 `SIM_MODE=false` 필요 (권장: 먼저 `IS_PAPER_TRADING=true`로 모의투자 검증).
+- **현재 운영**: 실계좌 API + SIM 주문 (시세는 live, 주문은 가상 시뮬).
+- **실매매 전환 시 변경**:
+  1. 먼저 `IS_PAPER_TRADING=true`, `SIM_MODE=false`로 모의투자 실주문 검증
+  2. 확인 후 `IS_PAPER_TRADING=false`, `SIM_MODE=false`로 실계좌 실주문
+
+**이슈 6 — 장 시작 전 `build_universe` 사전 실행** (운영 메모만, 코드 작업 보류)
+
+- **현재**: `python -m scripts.build_universe` 스크립트 이미 존재.
+- **운영 습관**: 매매일 **08:00~08:50** KST에 사전 실행 → `main.py`는 09:00 감시 즉시 시작.
+- **캐시 없이 `main.py`만 실행**하면 장중 인라인 빌드(~1시간)로 감시 지연.
+- cron/작업 스케줄러 설정은 추후 필요 시 추가 (현재는 수동 실행으로 충분).
 
 **이슈 5 — `vol_ma20=0` 종목 거래량 조건 무력화** ✅ (2026-05-26 수정)
 
@@ -291,18 +301,15 @@ python -m pytest -q
 |---|------|------|
 | 1 | 유니버스 빌드 속도 개선 (RS 전 전체 스크래핑 구조 변경) | ⬜ 예정 |
 | 2 | 전략1·2 유니버스 분리 (캐시·감시·매수 각각) | ⬜ 예정 |
-| 3 | result.xlsx 저장 시점/종료 처리 보강 | ⬜ 예정 |
-| 4 | SIM_MODE / live 모드 로그·문서 명확화 | ⬜ 예정 |
+| 3 | result.xlsx 저장 시점 (15:32 분리) | ✅ 완료 |
+| 4 | SIM_MODE / live 모드 — 운영 메모 (실매매 전환 시 변경) | 📝 메모만 |
 | 5 | vol_ma20=0 종목 필터 추가 | ✅ 완료 |
-| 6 | 장 시작 전 `build_universe` 사전 실행 워크플로 정리 | ⬜ 예정 |
+| 6 | build_universe 사전 실행 — 운영 메모 | 📝 메모만 |
 
-#### 다음 새 채팅에서 이어갈 작업 (1~4, 6번 — 큰 공사)
+#### 다음 작업 (1·2번)
 
 - **1번**: 2단계 수집(RS 14p → 통과 171×30p) 또는 증분 캐시 설계·구현
 - **2번**: 전략1·2 유니버스·캐시·감시·매수 분리
-- **3번**: result.xlsx 15:40 의존 제거, 종료/매매 시점 저장
-- **4번**: `IS_PAPER_TRADING` vs `SIM_MODE` 로그·문서·기본값 정리
-- **6번**: build_universe 사전 실행 가이드/cron
 
 ---
 
@@ -311,4 +318,6 @@ python -m pytest -q
 - **유니버스 빌드는 Naver primary** (시총·히스토리). 1차 필터 통과 종목 전체 스크래핑 시 **1시간 이상** 소요 가능 → 장 시작 전 `build_universe.py` 사전 실행 권장.
 - `IS_PAPER_TRADING`(API 엔드포인트)과 `SIM_MODE`(주문 시뮬레이션)는 **별개** 설정입니다.
 - `data/`는 기본적으로 git에 포함하지 않습니다 (로그·캐시·결과 파일 등).
-- `scripts/build_universe.py`는 장 시작 전(08:00~08:50 KST) 실행 권장. 캐시 없이 `main.py`만 실행하면 장중 인라인 빌드로 감시 시작이 지연됩니다.
+- `RESULT_WRITE_HHMM=15:32` — 장 종료(15:30) 후 result.xlsx 기록. `SHUTDOWN_HHMM=15:40` — 봇 종료.
+- **현재 운영**: `IS_PAPER_TRADING=false` + `SIM_MODE=true` (실계좌 API 시세, 주문 가상). 실매매 전환 시 `SIM_MODE=false` (먼저 paper에서 검증).
+- `scripts/build_universe.py`는 장 시작 전(08:00~08:50 KST) 수동 실행 권장.

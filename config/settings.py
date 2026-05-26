@@ -55,6 +55,7 @@ class Settings:
     # --- 스케줄 ---
     monitor_start_hhmm: str = "09:00"
     monitor_end_hhmm: str = "15:30"
+    result_write_hhmm: str = os.getenv("RESULT_WRITE_HHMM", "15:32")
     shutdown_hhmm: str = os.getenv("SHUTDOWN_HHMM", "15:40")
 
     # --- KIS API 호출 제한 ---

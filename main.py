@@ -100,10 +100,12 @@ class MoaRunner:
         ymd = now.strftime("%Y%m%d")
         hhmm = now.strftime("%H:%M")
 
-        if hhmm >= settings.shutdown_hhmm:
+        if hhmm >= settings.result_write_hhmm:
             if self._did_result_csv_ymd != ymd:
                 self._write_daily_result(ymd)
                 self._did_result_csv_ymd = ymd
+
+        if hhmm >= settings.shutdown_hhmm:
             self._should_stop = True
             return
 
