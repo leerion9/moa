@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 
+from core.universe_cache import MIN_VOL_MA20
+
 
 @dataclass
 class SymbolState:
@@ -72,6 +74,10 @@ class W52HighStrategy:
             return None
 
         if current_price < state.w52_high:
+            return None
+
+        # vol_ma20=0 등: 유니버스에서 걸러져야 하나 구캐시/예외 대비
+        if state.vol_ma20 < MIN_VOL_MA20:
             return None
 
         # 거래량 조건: 당일 누적 거래량 >= 20일 평균. 미충족 시 이번 tick만 패스.

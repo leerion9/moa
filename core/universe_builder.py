@@ -21,7 +21,7 @@ import requests
 
 from config.settings import Settings
 from core.api_client import KISApiClient, SymbolHistory
-from core.universe_cache import CachedSymbol, UniverseCache
+from core.universe_cache import CachedSymbol, MIN_VOL_MA20, UniverseCache
 
 _log = logging.getLogger("moa")
 
@@ -122,16 +122,20 @@ def build_features(
         cont_days: 전략2용 신고가 터치 조회 기간 (settings.w52_cont_lookback_days)
 
     Returns:
-        CachedSymbol, 또는 w52_high=0이거나 bars 부족 시 None.
+        CachedSymbol, 또는 w52_high=0, bars 부족, vol_ma20 미달 시 None.
     """
     if history.w52_high <= 0:
         return None
     if len(history.bars) < 20:
         return None
 
+    vol_ma20 = calc_vol_ma(history.bars, days=20)
+    if vol_ma20 < MIN_VOL_MA20:
+        return None
+
     return CachedSymbol(
         w52_high=history.w52_high,
-        vol_ma20=calc_vol_ma(history.bars, days=20),
+        vol_ma20=vol_ma20,
         w52_hit_60d=calc_w52_hit_count(history.bars, history.w52_high, lookback=fresh_days),
         w52_hit_10d=calc_w52_hit_count(history.bars, history.w52_high, lookback=cont_days),
     )

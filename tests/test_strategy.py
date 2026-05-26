@@ -29,6 +29,15 @@ def test_no_entry_when_volume_insufficient():
     assert sig is None
 
 
+def test_no_entry_when_vol_ma20_zero():
+    """vol_ma20=0이면 신고가·거래량과 무관하게 매수 신호 없음."""
+    s = W52HighStrategy(trailing_stop_pct=TRAILING_STOP)
+    s.register("380540", w52_high=5550, vol_ma20=0)
+
+    sig = s.on_quote("380540", current_price=5550, current_volume=1_000_000)
+    assert sig is None
+
+
 def test_no_double_entry():
     """이미 매수된 종목은 다시 신호 안 나옴."""
     s = W52HighStrategy(trailing_stop_pct=TRAILING_STOP)

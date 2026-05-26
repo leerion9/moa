@@ -271,6 +271,12 @@ def test_build_features_insufficient_bars():
     assert build_features(hist, fresh_days=60, cont_days=10) is None
 
 
+def test_build_features_zero_vol_ma20_excluded():
+    """20일 평균 거래량 0이면 유니버스 제외 (거래량 조건 무력화 방지)."""
+    hist = _make_history(w52_high=10000, n_bars=130, volume_per_bar=0)
+    assert build_features(hist, fresh_days=60, cont_days=10) is None
+
+
 # ---------------------------------------------------------------------------
 # apply_second_filter
 # ---------------------------------------------------------------------------
@@ -593,3 +599,25 @@ def test_builder_cache_metadata():
     assert cache.date_kst == "20260520"
     assert cache.strategy_mode == 2
     assert "2026-05-20" in cache.created_at_iso
+
+
+def test_load_cache_excludes_zero_vol_ma20(tmp_path):
+    """구 캐시 파일 로드 시 vol_ma20=0 종목 자동 제외."""
+    from core.universe_cache import CachedSymbol, UniverseCache, load_cache, save_cache
+
+    path = tmp_path / "universe_cache_20260526.json"
+    cache = UniverseCache(
+        date_kst="20260526",
+        strategy_mode=1,
+        created_at_iso="2026-05-26T08:00:00+09:00",
+        symbols={
+            "380540": CachedSymbol(w52_high=5550, vol_ma20=0, w52_hit_60d=0, w52_hit_10d=0),
+            "005930": CachedSymbol(w52_high=70000, vol_ma20=200_000, w52_hit_60d=0, w52_hit_10d=0),
+        },
+    )
+    save_cache(path, cache)
+
+    loaded = load_cache(path, strategy_mode=1)
+    assert loaded is not None
+    assert "380540" not in loaded.symbols
+    assert "005930" in loaded.symbols

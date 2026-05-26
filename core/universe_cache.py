@@ -8,6 +8,9 @@ from typing import Dict, Optional
 from zoneinfo import ZoneInfo
 
 
+MIN_VOL_MA20 = 1  # 20-day avg volume floor; 0 bypasses live volume check
+
+
 @dataclass(frozen=True)
 class CachedSymbol:
     w52_high: int           # 52주 최고가 (원)
@@ -22,6 +25,11 @@ class UniverseCache:
     strategy_mode: int      # 1 or 2
     created_at_iso: str
     symbols: Dict[str, CachedSymbol]
+
+
+def is_valid_cached_symbol(feat: CachedSymbol) -> bool:
+    """Universe/watchlist eligibility (also applied when loading stale cache files)."""
+    return feat.w52_high > 0 and feat.vol_ma20 >= MIN_VOL_MA20
 
 
 def today_kst_yyyymmdd(now: Optional[datetime] = None) -> str:
@@ -56,6 +64,8 @@ def load_cache(path: Path, strategy_mode: int) -> Optional[UniverseCache]:
             )
         except Exception:
             continue
+
+    symbols = {sym: feat for sym, feat in symbols.items() if is_valid_cached_symbol(feat)}
 
     if not symbols:
         return None
