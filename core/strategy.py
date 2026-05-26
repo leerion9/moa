@@ -11,6 +11,7 @@ class SymbolState:
     """종목별 감시 상태 (52주 신고가 돌파 매매)."""
     w52_high: int       # 52주 신고가 가격
     vol_ma20: int       # 20일 평균 거래량
+    strategy_mode: int = 0  # 1=최초돌파, 2=추세지속
 
     bought: bool = False        # 오늘 매수 주문 완료 여부
 
@@ -25,6 +26,7 @@ class EntrySignal:
     symbol: str
     entry_price: int            # 52주 신고가 = 진입 호가
     reason: str = "w52_high_breakout"
+    strategy_mode: int = 0
 
 
 @dataclass
@@ -45,11 +47,18 @@ class W52HighStrategy:
     trailing_stop_pct: float
     symbol_state: Dict[str, SymbolState] = field(default_factory=dict)
 
-    def register(self, symbol: str, w52_high: int, vol_ma20: int) -> None:
+    def register(
+        self,
+        symbol: str,
+        w52_high: int,
+        vol_ma20: int,
+        strategy_mode: int = 0,
+    ) -> None:
         """감시 목록에 종목 등록."""
         self.symbol_state[symbol] = SymbolState(
             w52_high=w52_high,
             vol_ma20=vol_ma20,
+            strategy_mode=strategy_mode,
         )
 
     def register_position(self, symbol: str, buy_price: int, qty: int) -> None:
@@ -75,6 +84,7 @@ class W52HighStrategy:
             self.symbol_state[symbol] = SymbolState(
                 w52_high=max(w52_high, 1),
                 vol_ma20=max(vol_ma20, MIN_VOL_MA20),
+                strategy_mode=0,
             )
         state = self.symbol_state[symbol]
         state.bought = True
@@ -107,7 +117,11 @@ class W52HighStrategy:
             return None
 
         state.bought = True
-        return EntrySignal(symbol=symbol, entry_price=state.w52_high)
+        return EntrySignal(
+            symbol=symbol,
+            entry_price=state.w52_high,
+            strategy_mode=state.strategy_mode,
+        )
 
     def on_position_quote(self, symbol: str, current_price: int) -> Optional[SellSignal]:
         """

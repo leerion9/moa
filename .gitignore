@@ -15,6 +15,7 @@ build/
 # 데이터 / 로그 / 캐시
 data/logs/
 data/universe_cache_*.json
+data/history_cache/
 data/positions.json
 data/kr_symbol_master.json
 data/symbol_names.json

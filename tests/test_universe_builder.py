@@ -605,7 +605,7 @@ def test_load_cache_excludes_zero_vol_ma20(tmp_path):
     """구 캐시 파일 로드 시 vol_ma20=0 종목 자동 제외."""
     from core.universe_cache import CachedSymbol, UniverseCache, load_cache, save_cache
 
-    path = tmp_path / "universe_cache_20260526.json"
+    path = tmp_path / "universe_cache_20260526_s1.json"
     cache = UniverseCache(
         date_kst="20260526",
         strategy_mode=1,

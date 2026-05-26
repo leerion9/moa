@@ -37,8 +37,23 @@ def today_kst_yyyymmdd(now: Optional[datetime] = None) -> str:
     return dt.strftime("%Y%m%d")
 
 
-def cache_path(base_dir: Path, date_kst: str) -> Path:
+def cache_path(base_dir: Path, date_kst: str, strategy_mode: int) -> Path:
+    return base_dir / f"universe_cache_{date_kst}_s{strategy_mode}.json"
+
+
+def legacy_cache_path(base_dir: Path, date_kst: str) -> Path:
     return base_dir / f"universe_cache_{date_kst}.json"
+
+
+def resolve_cache_path(base_dir: Path, date_kst: str, strategy_mode: int) -> Path:
+    """Prefer strategy-specific cache; fall back to legacy single-strategy file."""
+    new_path = cache_path(base_dir, date_kst, strategy_mode)
+    if new_path.exists():
+        return new_path
+    legacy = legacy_cache_path(base_dir, date_kst)
+    if legacy.exists():
+        return legacy
+    return new_path
 
 
 def load_cache(path: Path, strategy_mode: int) -> Optional[UniverseCache]:

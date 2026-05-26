@@ -87,6 +87,10 @@ class Settings:
     result_csv_kis_lookback_days: int = int(os.getenv("RESULT_CSV_KIS_LOOKBACK_DAYS", "30") or "30")
 
     naver_http_delay_sec: float = float(os.getenv("NAVER_HTTP_DELAY_SEC", "0.05") or "0.05")
+    naver_batch_size: int = int(os.getenv("NAVER_BATCH_SIZE", "50") or "50")
+    naver_batch_pause_sec: float = float(os.getenv("NAVER_BATCH_PAUSE_SEC", "3.0") or "3.0")
+    naver_request_jitter_sec: float = float(os.getenv("NAVER_REQUEST_JITTER_SEC", "0.03") or "0.03")
+    history_cache_dir: Path = ROOT_DIR / "data" / "history_cache"
 
     holiday_dates_path: Path = Path(
         os.getenv("HOLIDAY_DATES_PATH", str(ROOT_DIR / "config" / "korea_market_holidays.txt"))
@@ -111,6 +115,10 @@ class Settings:
     @property
     def result_xlsx_path(self) -> Path:
         return self.log_dir / "result.xlsx"
+
+    @property
+    def universe_xlsx_path(self) -> Path:
+        return self.log_dir / "universe.xlsx"
 
     @property
     def cano(self) -> str:

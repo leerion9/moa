@@ -4,17 +4,20 @@
 사용 예::
     python -m scripts.build_universe
     python -m scripts.build_universe --date 20260520
-    python -m scripts.build_universe --strategy 2
+    python -m scripts.build_universe --bootstrap-history
+    python -m scripts.build_universe --strategy 1   # 단일 전략만 (레거시)
 
 옵션:
-    --date      YYYYMMDD (기본: 오늘 KST)
-    --strategy  1 또는 2 (기본: settings.strategy_mode)
-    --force     캐시가 이미 있어도 강제 재빌드
+    --date               YYYYMMDD (기본: 오늘 KST)
+    --strategy           1 또는 2 (지정 시 해당 전략만 빌드)
+    --bootstrap-history  1차 필터 종목 history_cache 풀 수집
+    --force              캐시가 이미 있어도 강제 재빌드
 """
 
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import logging
 import sys
 from datetime import datetime
@@ -23,9 +26,11 @@ from zoneinfo import ZoneInfo
 
 from config.settings import settings
 from core.api_client import KISApiClient
+from core.history_cache import HistoryCacheStore
 from core.naver_symbol_master import load_or_refresh_symbol_master
 from core.universe_builder import UniverseBuilder
 from core.universe_cache import cache_path, load_cache, save_cache
+from core.universe_xlsx import append_universe_xlsx_rows
 
 logging.basicConfig(
     level=logging.INFO,
@@ -33,6 +38,17 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 _log = logging.getLogger("moa")
+
+
+def _build_history_store(api: KISApiClient) -> HistoryCacheStore:
+    return HistoryCacheStore(
+        settings.history_cache_dir,
+        delay_sec=settings.naver_http_delay_sec,
+        jitter_sec=settings.naver_request_jitter_sec,
+        batch_size=settings.naver_batch_size,
+        batch_pause_sec=settings.naver_batch_pause_sec,
+        api=api,
+    )
 
 
 def main() -> None:
@@ -45,7 +61,12 @@ def main() -> None:
         dest="strategy",
         type=int,
         choices=[1, 2],
-        help="전략 모드 (기본: settings.strategy_mode)",
+        help="단일 전략만 빌드 (미지정 시 전략1+2 동시)",
+    )
+    p.add_argument(
+        "--bootstrap-history",
+        action="store_true",
+        help="history_cache 풀 수집 (최초 1회, 약 1시간)",
     )
     p.add_argument(
         "--force",
@@ -57,29 +78,9 @@ def main() -> None:
     kst_now = datetime.now(ZoneInfo("Asia/Seoul"))
     ymd = args.ymd or kst_now.strftime("%Y%m%d")
 
-    # settings는 frozen dataclass이므로 strategy_mode를 override해야 하는 경우
-    # 별도 object로 관리하지 않고, builder에 넘기기 전에 effective_mode를 결정한다.
-    effective_mode = args.strategy or settings.strategy_mode
-
-    # settings의 strategy_mode가 다른 경우를 위한 래퍼
-    import dataclasses
-    effective_settings = dataclasses.replace(settings, strategy_mode=effective_mode)
-
     data_dir = Path("data")
-    ucache_path = cache_path(data_dir, ymd)
+    api = KISApiClient(settings=settings)
 
-    # 캐시 존재 확인
-    if not args.force:
-        existing = load_cache(ucache_path, strategy_mode=effective_mode)
-        if existing is not None and existing.date_kst == ymd:
-            print(
-                f"[build_universe] 캐시 이미 존재: {ucache_path.name} "
-                f"({len(existing.symbols)}종목, strategy={existing.strategy_mode})"
-            )
-            print("  강제 재빌드 하려면 --force 옵션을 사용하세요.")
-            return
-
-    # 종목 마스터 로드 (ETF 필터용)
     _log.info("종목 마스터 로드 중 ...")
     symbol_names = load_or_refresh_symbol_master(
         settings.symbol_master_path,
@@ -89,18 +90,30 @@ def main() -> None:
     )
     _log.info("종목 마스터: %d종목", len(symbol_names))
 
-    # 유니버스 빌드
-    api = KISApiClient(settings=effective_settings)
+    history_store = _build_history_store(api)
     builder = UniverseBuilder(
         api=api,
-        settings=effective_settings,
+        settings=settings,
         symbol_names=symbol_names,
+        history_store=history_store,
     )
 
-    _log.info("유니버스 빌드 시작 (date=%s strategy=%s) ...", ymd, effective_mode)
-    t0 = datetime.now()
+    if args.bootstrap_history:
+        cap_list = builder._fetch_cap_list()
+        filtered = builder._apply_first_filter(cap_list)
+        _log.info("history bootstrap 대상: %d종목", len(filtered))
+        t0 = datetime.now()
+        stats = history_store.bootstrap_all(filtered)
+        elapsed = (datetime.now() - t0).total_seconds()
+        print(
+            f"\n[bootstrap-history] 완료 total={stats.total} "
+            f"new={stats.bootstrapped} skipped={stats.skipped} "
+            f"failed={stats.failed} elapsed={elapsed:.1f}s"
+        )
+        if args.strategy is None and not args.force:
+            # bootstrap only unless user also wants universe build
+            return
 
-    # date 파라미터가 지정된 경우 now_kst를 해당 날짜 08:30으로 설정
     if args.ymd:
         build_dt = datetime.strptime(ymd, "%Y%m%d").replace(
             hour=8, minute=30, tzinfo=ZoneInfo("Asia/Seoul")
@@ -108,36 +121,79 @@ def main() -> None:
     else:
         build_dt = kst_now
 
+    t0 = datetime.now()
+
+    if args.strategy is not None:
+        effective_settings = dataclasses.replace(settings, strategy_mode=args.strategy)
+        single_builder = UniverseBuilder(
+            api=api,
+            settings=effective_settings,
+            symbol_names=symbol_names,
+            history_store=history_store,
+        )
+        ucache_path = cache_path(data_dir, ymd, args.strategy)
+        if not args.force:
+            existing = load_cache(ucache_path, strategy_mode=args.strategy)
+            if existing is not None and existing.date_kst == ymd:
+                print(
+                    f"[build_universe] 캐시 이미 존재: {ucache_path.name} "
+                    f"({len(existing.symbols)}종목)"
+                )
+                return
+        universe = single_builder.build(now_kst=build_dt)
+        save_cache(ucache_path, universe)
+        elapsed = (datetime.now() - t0).total_seconds()
+        print(
+            f"\n[build_universe] 완료 strategy={universe.strategy_mode} "
+            f"종목={len(universe.symbols)} elapsed={elapsed:.1f}s "
+            f"path={ucache_path}"
+        )
+        return
+
+    path_s1 = cache_path(data_dir, ymd, 1)
+    path_s2 = cache_path(data_dir, ymd, 2)
+    if not args.force:
+        c1 = load_cache(path_s1, strategy_mode=1)
+        c2 = load_cache(path_s2, strategy_mode=2)
+        if (
+            c1 is not None
+            and c2 is not None
+            and c1.date_kst == ymd
+            and c2.date_kst == ymd
+        ):
+            print(
+                f"[build_universe] dual 캐시 이미 존재: "
+                f"s1={len(c1.symbols)} s2={len(c2.symbols)}"
+            )
+            print("  강제 재빌드: --force")
+            return
+
+    _log.info("dual 유니버스 빌드 시작 (date=%s) ...", ymd)
     try:
-        universe = builder.build(now_kst=build_dt)
+        result = builder.build_dual(now_kst=build_dt, bootstrap=False)
     except Exception as exc:
         _log.error("유니버스 빌드 실패: %s", exc, exc_info=True)
         sys.exit(1)
 
-    elapsed = (datetime.now() - t0).total_seconds()
-
-    # 저장
-    save_cache(ucache_path, universe)
-
-    print(
-        f"\n[build_universe] 완료!"
-        f"\n  date={universe.date_kst}"
-        f"\n  strategy={universe.strategy_mode}"
-        f"\n  종목 수={len(universe.symbols)}"
-        f"\n  소요시간={elapsed:.1f}초"
-        f"\n  저장위치={ucache_path}"
+    save_cache(path_s1, result.cache_s1)
+    save_cache(path_s2, result.cache_s2)
+    append_universe_xlsx_rows(
+        settings.universe_xlsx_path,
+        result.xlsx_rows,
+        symbol_names=symbol_names,
     )
 
-    if universe.symbols:
-        sample = list(universe.symbols.items())[:5]
-        print("\n  [샘플 상위 5종목]")
-        for sym, feat in sample:
-            name = symbol_names.get(sym, "")
-            print(
-                f"  {sym} {name:12s} | 52주고가={feat.w52_high:,} "
-                f"vol_ma20={feat.vol_ma20:,} "
-                f"hit60d={feat.w52_hit_60d} hit10d={feat.w52_hit_10d}"
-            )
+    elapsed = (datetime.now() - t0).total_seconds()
+    print(
+        f"\n[build_universe] dual 완료!"
+        f"\n  date={result.date_kst}"
+        f"\n  strategy1={len(result.cache_s1.symbols)}"
+        f"\n  strategy2={len(result.cache_s2.symbols)}"
+        f"\n  elapsed={elapsed:.1f}s"
+        f"\n  cache_s1={path_s1}"
+        f"\n  cache_s2={path_s2}"
+        f"\n  universe.xlsx={settings.universe_xlsx_path}"
+    )
 
 
 if __name__ == "__main__":

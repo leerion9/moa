@@ -58,6 +58,8 @@ moa/
 │   ├── trading_day.py        # 휴장일 판단
 │   ├── universe_builder.py   # 유니버스 빌더 (1차/RS/2차 필터 파이프라인)
 │   ├── universe_cache.py     # 당일 유니버스 캐시
+│   ├── history_cache.py      # Naver 일봉 영구 캐시 (증분 갱신)
+│   ├── universe_xlsx.py      # universe.xlsx writer
 │   ├── open_positions.py     # 기존 보유 종목 조회 (매수 감시 제외)
 │   ├── naver_universe.py     # 네이버 종목 스크래핑
 │   ├── naver_symbol_master.py
@@ -106,11 +108,14 @@ SHUTDOWN_HHMM=15:40     # 봇 종료
 
 ## 실행
 ```bash
-# 장 시작 전 유니버스 배치 빌드 (08:00~08:50 권장)
-python -m scripts.build_universe
+# 최초 1회 — 1차 필터 종목 history 풀 수집 (~1시간, 2026-05-26 완료: 1714종)
+python -m scripts.build_universe --bootstrap-history
 
-# 매매 봇 실행
+# 매매 봇 (운영: PC 08:20 기동, main.py 08:30 → 증분 갱신 ~12-17분 → 09:00 감시)
 python main.py
+
+# 수동 dual 유니버스만 빌드 (선택)
+python -m scripts.build_universe
 ```
 
 ## 테스트
@@ -250,20 +255,19 @@ python -m pytest -q
 
 #### 확인된 이슈 (5건)
 
-**이슈 1 — 유니버스 빌드가 장중에 너무 오래 걸림 (~64분)**
+**이슈 1 — 유니버스 빌드가 장중에 너무 오래 걸림 (~64분)** ✅ (2026-05-26 수정)
 
-- **원인**: 1차 필터 통과 1,721종목 **전체**에 Naver 30페이지(≈300봉) 스크래핑 후, RS 필터(→171종목) 적용.
-- **영향**: 09:00~09:44 구간 감시 불가.
-- **개선 방향 (예정)**:
-  - RS 필터 **이전** 전체 히스토리 수집 구조 변경 (RS용 최소 데이터만 먼저 수집 등)
-  - 장 시작 전 `python -m scripts.build_universe` **사전 배치** 실행 필수화
-  - 빌드 진행률·예상 소요 시간 로그 보강
+- **원인**: 1차 필터 통과 종목 전체 30페이지 스크래핑 후 RS 필터.
+- **수정**: `data/history_cache/` 영구 캐시 + 매일 page1 증분 merge. 최초 bootstrap 1714종 (~67분) 완료.
+- **일일 소요**: 증분 갱신 + dual 유니버스 **약 12~17분** → `main.py` **08:30** 가동 권장 (PC **08:20**).
+- **파일**: `core/history_cache.py`, `scripts/build_universe.py --bootstrap-history`
 
-**이슈 2 — 전략1·전략2 유니버스 동시 운영 미구현**
+**이슈 2 — 전략1·전략2 유니버스 동시 운영 미구현** ✅ (2026-05-26 수정)
 
-- **현재**: `.env`의 `STRATEGY_MODE` **하나**만 사용. 캐시 파일도 `universe_cache_YYYYMMDD.json` **1개** (날짜만 구분).
-- **영향**: 전략2 감시 목록 별도 생성·동시 매수 불가. 같은 날짜 캐시를 덮어쓰는 구조.
-- **목표 (예정)**: 전략1·2 유니버스 **각각** 생성·캐시·감시. 조건 충족 시 **각 전략별** 지정가 매수.
+- **수정**: `build_dual()` — `universe_cache_YYYYMMDD_s1.json` / `_s2.json` 각각 저장.
+- **main.py**: 전략1+2 동시 감시, 포지션 **합산 4종** 공유, 종목별 `strategy_mode` 태그.
+- **기록**: `data/logs/{mode}/universe.xlsx` — 날짜·전략·RS·52주고가 등 append.
+- **파일**: `core/universe_builder.py`, `core/universe_xlsx.py`, `main.py`
 
 **이슈 3 — result.xlsx 미생성 (15:40 전 프로세스 종료)** ✅ (2026-05-26 수정)
 
@@ -281,12 +285,11 @@ python -m pytest -q
   1. 먼저 `IS_PAPER_TRADING=true`, `SIM_MODE=false`로 모의투자 실주문 검증
   2. 확인 후 `IS_PAPER_TRADING=false`, `SIM_MODE=false`로 실계좌 실주문
 
-**이슈 6 — 장 시작 전 `build_universe` 사전 실행** (운영 메모만, 코드 작업 보류)
+**이슈 6 — 장 시작 전 유니버스 준비** ✅ (운영)
 
-- **현재**: `python -m scripts.build_universe` 스크립트 이미 존재.
-- **운영 습관**: 매매일 **08:00~08:50** KST에 사전 실행 → `main.py`는 09:00 감시 즉시 시작.
-- **캐시 없이 `main.py`만 실행**하면 장중 인라인 빌드(~1시간)로 감시 지연.
-- cron/작업 스케줄러 설정은 추후 필요 시 추가 (현재는 수동 실행으로 충분).
+- **운영**: PC **08:20** 기동 → `main.py` **08:30** (증분 ~12-17분) → **09:00** 감시.
+- `main.py`가 history 증분 + dual 유니버스 + `universe.xlsx`까지 자동 처리.
+- bootstrap 미완료 시 최초 1회: `python -m scripts.build_universe --bootstrap-history`
 
 **이슈 5 — `vol_ma20=0` 종목 거래량 조건 무력화** ✅ (2026-05-26 수정)
 
@@ -301,20 +304,21 @@ python -m pytest -q
 
 | # | 항목 | 상태 |
 |---|------|------|
-| 1 | 유니버스 빌드 속도 개선 (RS 전 전체 스크래핑 구조 변경) | ⬜ 예정 |
-| 2 | 전략1·2 유니버스 분리 (캐시·감시·매수 각각) | ⬜ 예정 |
+| 1 | 유니버스 빌드 속도 (history_cache 증분) | ✅ 완료 |
+| 2 | 전략1·2 dual 유니버스·감시 | ✅ 완료 |
 | 3 | result.xlsx 저장 시점 (15:32 분리) | ✅ 완료 |
-| 4 | SIM_MODE / live 모드 — 운영 메모 (실매매 전환 시 변경) | 📝 메모만 |
+| 4 | SIM_MODE / live 모드 — 운영 메모 | 📝 메모만 |
 | 5 | vol_ma20=0 종목 필터 추가 | ✅ 완료 |
-| 6 | build_universe 사전 실행 — 운영 메모 | 📝 메모만 |
+| 6 | 장 시작 전 main 08:30 가동 | ✅ 운영 |
 | 7 | 보유 종목 다음날 매수 감시 제외 | ✅ 완료 |
+| 8 | universe.xlsx 일별 감시 기록 | ✅ 완료 |
 
-#### 다음 새 채팅에서 이어갈 작업 (1·2번)
+#### Phase 4 후속 완료 (2026-05-26)
 
-- **1번**: 2단계 수집(RS 14p → 통과 171×30p) 또는 증분 캐시 설계·구현
-- **2번**: 전략1·2 유니버스·캐시·감시·매수 분리
-
-#### 기타 완료 (Phase 4 후속)
+**history_cache + dual 유니버스** ✅
+- bootstrap: 1714종 `data/history_cache/` (git 제외)
+- 일일: page1 merge → RS/피처 → s1/s2 캐시 → `universe.xlsx`
+- Naver IP: delay + jitter + 50종 batch pause + 재시도
 
 **보유 종목 매수 감시 제외** ✅
 - **당일**: `watchlist_symbols()` — `bought=True` 종목 제외 (기존)
@@ -325,9 +329,10 @@ python -m pytest -q
 
 ## 중요 메모
 - KIS 요청 제한을 피하기 위해 예수금 조회는 캐시를 사용합니다.
-- **유니버스 빌드는 Naver primary** (시총·히스토리). 1차 필터 통과 종목 전체 스크래핑 시 **1시간 이상** 소요 가능 → 장 시작 전 `build_universe.py` 사전 실행 권장.
-- `IS_PAPER_TRADING`(API 엔드포인트)과 `SIM_MODE`(주문 시뮬레이션)는 **별개** 설정입니다.
-- `data/`는 기본적으로 git에 포함하지 않습니다 (로그·캐시·결과 파일 등).
-- `RESULT_WRITE_HHMM=15:32` — 장 종료(15:30) 후 result.xlsx 기록. `SHUTDOWN_HHMM=15:40` — 봇 종료.
-- **현재 운영**: `IS_PAPER_TRADING=false` + `SIM_MODE=true` (실계좌 API 시세, 주문 가상). 실매매 전환 시 `SIM_MODE=false` (먼저 paper에서 검증).
-- `scripts/build_universe.py`는 장 시작 전(08:00~08:50 KST) 수동 실행 권장.
+- **history_cache**: bootstrap 1회 후 매일 page1 증분 (~12-17분). `data/history_cache/` (git 제외).
+- **dual 유니버스**: `universe_cache_YYYYMMDD_s1.json` / `_s2.json`, `universe.xlsx` append.
+- **운영 스케줄**: PC **08:20**, `main.py` **08:30**, 감시 **09:00~15:30**.
+- `IS_PAPER_TRADING`(API)과 `SIM_MODE`(주문 시뮬)는 **별개** 설정.
+- `data/`는 git에 포함하지 않습니다 (로그·캐시·결과 파일).
+- `RESULT_WRITE_HHMM=15:32`, `SHUTDOWN_HHMM=15:40`.
+- **현재 운영**: `IS_PAPER_TRADING=false` + `SIM_MODE=true`. 실매매 전환 시 `SIM_MODE=false`.

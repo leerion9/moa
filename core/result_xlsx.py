@@ -93,6 +93,7 @@ def append_result_xlsx_rows(
     symbol_names: Dict[str, str],
     kis_symbol_names: Optional[Dict[str, str]] = None,
     strategy_mode: Optional[int] = None,
+    symbol_strategies: Optional[Dict[str, int]] = None,
 ) -> None:
     """result.xlsx에 rows를 이어쓰기. 파일 없으면 신규 생성."""
     if not rows:
@@ -110,6 +111,11 @@ def append_result_xlsx_rows(
         sym_raw = str(r["symbol"]).strip()
         sym = sym_raw.zfill(6) if sym_raw.isdigit() else sym_raw
         name = (symbol_names.get(sym, "") or kis_nm.get(sym, "")).strip()
+        row_strategy = r.get("strategy_mode")
+        if row_strategy is None and symbol_strategies:
+            row_strategy = symbol_strategies.get(sym, strategy_mode)
+        if row_strategy is None:
+            row_strategy = strategy_mode
         kind = str(r.get("kind", "CLOSED"))
         buy_ts = r.get("buy_ts_first") or r.get("buy_ts_last")
         buy_date = buy_ts.astimezone(KST).date() if buy_ts else None
@@ -142,7 +148,7 @@ def append_result_xlsx_rows(
             ws.cell(row_num, _COL["수수료"]).value = int(round(float(r.get("fee", 0))))
             ws.cell(row_num, _COL["성공률"]).value = None
             ws.cell(row_num, _COL["평균수익률"]).value = None
-            ws.cell(row_num, _COL["매매전략"]).value = strategy_mode
+            ws.cell(row_num, _COL["매매전략"]).value = row_strategy
         else:
             sell_ts = r["sell_ts"]
             pnl = float(r["pnl"])
@@ -158,7 +164,7 @@ def append_result_xlsx_rows(
             ws.cell(row_num, _COL["수수료"]).value = int(round(float(r.get("fee", 0))))
             ws.cell(row_num, _COL["성공률"]).value = f"=IF(O{row_num}>=0,1,0)"
             ws.cell(row_num, _COL["평균수익률"]).value = f"=O{row_num}/100"
-            ws.cell(row_num, _COL["매매전략"]).value = strategy_mode
+            ws.cell(row_num, _COL["매매전략"]).value = row_strategy
 
     wb.save(path)
 

@@ -20,6 +20,7 @@ from core.universe_cache import (
     UniverseCache,
     cache_path,
     load_cache,
+    resolve_cache_path,
     save_cache,
     today_kst_yyyymmdd,
 )
@@ -37,6 +38,8 @@ class MoaRunner:
         self.strategy = W52HighStrategy(trailing_stop_pct=settings.trailing_stop_pct)
 
         self.watchlist: List[str] = []         # 당일 감시 대상 (매수 후보)
+        self.universe_symbols: Dict[str, CachedSymbol] = {}
+        self.symbol_strategies: Dict[str, int] = {}  # symbol -> 1 or 2
         self.positions: List[str] = []         # 현재 보유 종목
 
         self.ordered_symbols_today: set[str] = set()
@@ -76,7 +79,7 @@ class MoaRunner:
 
         self.logger.info(
             f"moa started. mode={'paper' if settings.is_paper_trading else 'live'} "
-            f"strategy={settings.strategy_mode}"
+            f"strategies=1+2 dual"
         )
 
         hhmm = now.strftime("%H:%M")
@@ -118,66 +121,114 @@ class MoaRunner:
 
     def prepare_universe(self) -> None:
         """
-        당일 감시 목록 준비.
-        캐시가 있으면 재사용, 없으면 유니버스 빌더(Phase 2)에서 생성.
+        당일 감시 목록 준비 (전략1+2 동시).
+        history_cache 증분 갱신 후 dual 유니버스 생성/로드.
         """
-        self.logger.info("유니버스 준비 중...")
+        self.logger.info("유니버스 준비 중 (전략1+2)...")
 
         cache_date = today_kst_yyyymmdd(self._now_kst())
-        ucache_path = cache_path(Path("data"), cache_date)
-        cached = load_cache(ucache_path, strategy_mode=settings.strategy_mode)
-        universe_symbols: Dict[str, CachedSymbol] = {}
+        data_dir = Path("data")
+        path_s1 = resolve_cache_path(data_dir, cache_date, 1)
+        path_s2 = resolve_cache_path(data_dir, cache_date, 2)
+        c1 = load_cache(path_s1, strategy_mode=1)
+        c2 = load_cache(path_s2, strategy_mode=2)
 
-        if cached is not None and cached.date_kst == cache_date:
-            universe_symbols = dict(cached.symbols)
-            self.watchlist = list(universe_symbols.keys())
-            for symbol, feat in universe_symbols.items():
-                self.strategy.register(
-                    symbol=symbol,
-                    w52_high=feat.w52_high,
-                    vol_ma20=feat.vol_ma20,
-                )
+        if (
+            c1 is not None
+            and c2 is not None
+            and c1.date_kst == cache_date
+            and c2.date_kst == cache_date
+        ):
+            self._register_universe_caches(c1, c2)
             self.logger.info(
-                f"유니버스 캐시 로드: {ucache_path.name} ({len(self.watchlist)}종목)"
+                f"유니버스 캐시 로드: s1={len(c1.symbols)} s2={len(c2.symbols)} "
+                f"watchlist={len(self.watchlist)}"
             )
         else:
-            self.logger.info("유니버스 캐시 없음. 빌드 시작 ...")
+            self.logger.info("유니버스 캐시 없음/불완전. dual 빌드 시작 ...")
             try:
+                from core.history_cache import HistoryCacheStore
+                from core.universe_xlsx import append_universe_xlsx_rows
+
                 symbol_names = load_or_refresh_symbol_master(
                     settings.symbol_master_path,
                     auto_refresh=settings.symbol_master_auto_refresh,
                     max_age_days=settings.symbol_master_max_age_days,
                     delay_sec=settings.naver_http_delay_sec,
                 )
+                history_store = HistoryCacheStore(
+                    settings.history_cache_dir,
+                    delay_sec=settings.naver_http_delay_sec,
+                    jitter_sec=settings.naver_request_jitter_sec,
+                    batch_size=settings.naver_batch_size,
+                    batch_pause_sec=settings.naver_batch_pause_sec,
+                    api=self.api,
+                )
                 builder = UniverseBuilder(
                     api=self.api,
                     settings=settings,
                     symbol_names=symbol_names,
+                    history_store=history_store,
                 )
-                new_cache = builder.build(now_kst=self._now_kst())
-                save_cache(ucache_path, new_cache)
-                universe_symbols = dict(new_cache.symbols)
-                self.watchlist = list(universe_symbols.keys())
-                for symbol, feat in universe_symbols.items():
-                    self.strategy.register(
-                        symbol=symbol,
-                        w52_high=feat.w52_high,
-                        vol_ma20=feat.vol_ma20,
-                    )
+                result = builder.build_dual(now_kst=self._now_kst(), bootstrap=False)
+                save_cache(cache_path(data_dir, cache_date, 1), result.cache_s1)
+                save_cache(cache_path(data_dir, cache_date, 2), result.cache_s2)
+                append_universe_xlsx_rows(
+                    settings.universe_xlsx_path,
+                    result.xlsx_rows,
+                    symbol_names=symbol_names,
+                )
+                self._register_universe_caches(result.cache_s1, result.cache_s2)
                 self.logger.info(
-                    f"유니버스 빌드 완료: {ucache_path.name} ({len(self.watchlist)}종목)"
+                    f"유니버스 dual 빌드 완료: s1={len(result.cache_s1.symbols)} "
+                    f"s2={len(result.cache_s2.symbols)} watchlist={len(self.watchlist)} "
+                    f"xlsx={settings.universe_xlsx_path.name}"
                 )
             except Exception as exc:
                 self.logger.error(f"유니버스 빌드 실패: {exc}. 감시 목록 비어 있습니다.")
                 self.watchlist = []
+                self.universe_symbols = {}
+                self.symbol_strategies = {}
 
-        self._apply_open_positions(universe_symbols)
+        self._apply_open_positions(self.universe_symbols)
 
         self.logger.info(
-            f"감시 준비 완료. 종목={len(self.watchlist)}개 "
-            f"전략={settings.strategy_mode} "
+            f"감시 준비 완료. watchlist={len(self.watchlist)} "
+            f"s1={sum(1 for v in self.symbol_strategies.values() if v == 1)} "
+            f"s2={sum(1 for v in self.symbol_strategies.values() if v == 2)} "
             f"({settings.monitor_start_hhmm}~{settings.monitor_end_hhmm} KST)"
         )
+
+    def _register_universe_caches(
+        self,
+        cache_s1: UniverseCache,
+        cache_s2: UniverseCache,
+    ) -> None:
+        self.strategy.symbol_state.clear()
+        self.universe_symbols = {}
+        self.symbol_strategies = {}
+
+        for symbol, feat in cache_s1.symbols.items():
+            self.strategy.register(
+                symbol=symbol,
+                w52_high=feat.w52_high,
+                vol_ma20=feat.vol_ma20,
+                strategy_mode=1,
+            )
+            self.universe_symbols[symbol] = feat
+            self.symbol_strategies[symbol] = 1
+
+        for symbol, feat in cache_s2.symbols.items():
+            self.strategy.register(
+                symbol=symbol,
+                w52_high=feat.w52_high,
+                vol_ma20=feat.vol_ma20,
+                strategy_mode=2,
+            )
+            self.universe_symbols[symbol] = feat
+            self.symbol_strategies[symbol] = 2
+
+        self.watchlist = self.strategy.watchlist_symbols()
 
     def _load_open_positions(self) -> Dict[str, object]:
         from core.open_positions import (
@@ -276,7 +327,7 @@ class MoaRunner:
                 "action": "SKIP_FULL_CAP" if not can_buy else (
                     "SIM_BUY" if settings.sim_mode else "BUY_ATTEMPT"
                 ),
-                "note": "",
+                "note": f"strategy={signal.strategy_mode or self.symbol_strategies.get(symbol, 0)}",
             })
 
             if not can_buy:
@@ -330,6 +381,7 @@ class MoaRunner:
                     "symbol": symbol,
                     "qty": qty,
                     "price": signal.entry_price,
+                    "strategy_mode": signal.strategy_mode or self.symbol_strategies.get(symbol, 0),
                 })
 
             self.logger.log_trade({
@@ -348,8 +400,9 @@ class MoaRunner:
                 "pnl_cash_delta": "",
             })
             label = "가상매수" if settings.sim_mode else "매수"
+            strat = signal.strategy_mode or self.symbol_strategies.get(symbol, 0)
             self.logger.info(
-                f"[{label}] {symbol} price={signal.entry_price} qty={qty}"
+                f"[{label}] {symbol} price={signal.entry_price} qty={qty} strategy={strat}"
                 + (f" ord_no={ord_no}" if not settings.sim_mode else "")
             )
             self._hb_buys += 1
@@ -503,6 +556,7 @@ class MoaRunner:
                 settings.result_xlsx_path, daily_rows, names,
                 kis_symbol_names=kis_names,
                 strategy_mode=settings.strategy_mode,
+                symbol_strategies=self.symbol_strategies,
             )
             self.logger.info(f"result.xlsx 갱신: {ymd} ({len(daily_rows)}건)")
         except Exception as exc:

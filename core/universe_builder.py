@@ -13,8 +13,9 @@ Pipeline:
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 import requests
@@ -22,6 +23,9 @@ import requests
 from config.settings import Settings
 from core.api_client import KISApiClient, SymbolHistory
 from core.universe_cache import CachedSymbol, MIN_VOL_MA20, UniverseCache
+
+if TYPE_CHECKING:
+    from core.history_cache import HistoryCacheStore
 
 _log = logging.getLogger("moa")
 
@@ -164,6 +168,76 @@ def apply_second_filter(
     return result
 
 
+@dataclass
+class DualUniverseBuildResult:
+    date_kst: str
+    created_at_iso: str
+    cache_s1: UniverseCache
+    cache_s2: UniverseCache
+    xlsx_rows: List[Dict[str, Any]] = field(default_factory=list)
+    first_filter_count: int = 0
+    rs_passed_count: int = 0
+
+
+def compute_rs_ranks(symbol_returns: Dict[str, float]) -> Dict[str, int]:
+    ranked = sorted(symbol_returns.items(), key=lambda x: x[1], reverse=True)
+    return {sym: idx + 1 for idx, (sym, _) in enumerate(ranked)}
+
+
+def build_universe_xlsx_rows(
+    *,
+    date_kst: str,
+    created_at_iso: str,
+    cap_by_symbol: Dict[str, int],
+    symbol_returns: Dict[str, float],
+    rs_passed: List[str],
+    rs_ranks: Dict[str, int],
+    rs_top_pct: float,
+    features: Dict[str, CachedSymbol],
+    final_s1: Dict[str, CachedSymbol],
+    final_s2: Dict[str, CachedSymbol],
+    histories: Dict[str, SymbolHistory],
+    symbol_names: Dict[str, str],
+) -> List[Dict[str, Any]]:
+    """Build append rows for universe.xlsx (watchlisted symbols only)."""
+    rows: List[Dict[str, Any]] = []
+    rs_passed_set = set(rs_passed)
+    watch_s1 = set(final_s1.keys())
+    watch_s2 = set(final_s2.keys())
+
+    for strategy_mode, watch_set in ((1, watch_s1), (2, watch_s2)):
+        for sym in sorted(watch_set):
+            feat = final_s1.get(sym) if strategy_mode == 1 else final_s2.get(sym)
+            if feat is None:
+                continue
+            hist = histories.get(sym)
+            close = int(hist.bars[0].get("close", 0)) if hist and hist.bars else 0
+            bar_count = len(hist.bars) if hist else 0
+            rs_ret = symbol_returns.get(sym)
+            rows.append(
+                {
+                    "date_kst": date_kst,
+                    "strategy_mode": strategy_mode,
+                    "symbol": sym,
+                    "name": symbol_names.get(sym, ""),
+                    "market_cap_billion": cap_by_symbol.get(sym),
+                    "rs_return_pct": (rs_ret * 100.0) if rs_ret is not None else None,
+                    "rs_rank": rs_ranks.get(sym),
+                    "rs_top_pct": rs_top_pct,
+                    "w52_high": feat.w52_high,
+                    "vol_ma20": feat.vol_ma20,
+                    "w52_hit_60d": feat.w52_hit_60d,
+                    "w52_hit_10d": feat.w52_hit_10d,
+                    "close": close,
+                    "bar_count": bar_count,
+                    "rs_passed": "Y" if sym in rs_passed_set else "N",
+                    "watchlisted": "Y",
+                    "created_at_iso": created_at_iso,
+                }
+            )
+    return rows
+
+
 # ---------------------------------------------------------------------------
 # UniverseBuilder
 # ---------------------------------------------------------------------------
@@ -176,7 +250,7 @@ class UniverseBuilder:
 
         builder = UniverseBuilder(api=api, settings=settings)
         cache = builder.build()
-        save_cache(cache_path(Path("data"), cache.date_kst), cache)
+        save_cache(cache_path(Path("data"), cache.date_kst, cache.strategy_mode), cache)
     """
 
     def __init__(
@@ -184,6 +258,7 @@ class UniverseBuilder:
         api: KISApiClient,
         settings: Settings,
         symbol_names: Optional[Dict[str, str]] = None,
+        history_store: Optional["HistoryCacheStore"] = None,
     ) -> None:
         self.api = api
         self.settings = settings
@@ -191,6 +266,8 @@ class UniverseBuilder:
         self.symbol_names: Dict[str, str] = symbol_names or {}
         # _cap_list_names: 시총 목록 수집 시 부산물로 얻은 종목명 (ETF 이름 필터 fallback).
         self._cap_list_names: Dict[str, str] = {}
+        self._cap_by_symbol: Dict[str, int] = {}
+        self.history_store = history_store
         # Naver HTTP 세션 (lazy init, 히스토리 수집 전체에 재사용).
         self._naver_session: Optional[requests.Session] = None
 
@@ -214,7 +291,7 @@ class UniverseBuilder:
         filtered = self._apply_first_filter(cap_list)
         _log.info("[UB] Step2 1차 필터 후: %d종목", len(filtered))
 
-        histories = self._fetch_histories(filtered)
+        histories = self._collect_histories(filtered, bootstrap=False)
         _log.info("[UB] Step3 히스토리 수집: %d/%d", len(histories), len(filtered))
 
         rs_passed, symbol_returns = self._apply_rs_filter(filtered, histories)
@@ -242,6 +319,109 @@ class UniverseBuilder:
             created_at_iso=now_kst.isoformat(),
             symbols=final,
         )
+
+    def build_dual(
+        self,
+        now_kst: Optional[datetime] = None,
+        *,
+        bootstrap: bool = False,
+    ) -> DualUniverseBuildResult:
+        """전략1·2 유니버스를 한 번에 생성 (히스토리 캐시 공유)."""
+        now_kst = now_kst or datetime.now(ZoneInfo("Asia/Seoul"))
+        date_kst = now_kst.strftime("%Y%m%d")
+        created_at_iso = now_kst.isoformat()
+
+        _log.info("[UB] dual 유니버스 빌드 시작 date=%s bootstrap=%s", date_kst, bootstrap)
+
+        cap_list = self._fetch_cap_list()
+        _log.info("[UB] Step1 시총 목록: %d종목", len(cap_list))
+
+        self._cap_by_symbol = {sym: cap for sym, cap in cap_list if sym and cap}
+        filtered = self._apply_first_filter(cap_list)
+        _log.info("[UB] Step2 1차 필터 후: %d종목", len(filtered))
+
+        histories = self._collect_histories(filtered, bootstrap=bootstrap)
+        _log.info("[UB] Step3 히스토리: %d/%d", len(histories), len(filtered))
+
+        rs_passed, symbol_returns = self._apply_rs_filter(filtered, histories)
+        _log.info(
+            "[UB] Step4 RS 필터: 계산가능=%d → 상위%d%%=%d종목",
+            len(symbol_returns),
+            int(self.settings.rs_top_pct * 100),
+            len(rs_passed),
+        )
+
+        features = self._compute_features(rs_passed, histories)
+        _log.info("[UB] Step5 피처 계산: %d종목", len(features))
+
+        final_s1 = apply_second_filter(
+            features,
+            strategy_mode=1,
+            fresh_days=self.settings.w52_fresh_days,
+            cont_min_hits=self.settings.w52_cont_min_hits,
+        )
+        final_s2 = apply_second_filter(
+            features,
+            strategy_mode=2,
+            fresh_days=self.settings.w52_fresh_days,
+            cont_min_hits=self.settings.w52_cont_min_hits,
+        )
+        _log.info(
+            "[UB] Step6 최종 감시 — strategy1=%d strategy2=%d",
+            len(final_s1),
+            len(final_s2),
+        )
+
+        rs_ranks = compute_rs_ranks(symbol_returns)
+        effective_names = self.symbol_names if self.symbol_names else self._cap_list_names
+        xlsx_rows = build_universe_xlsx_rows(
+            date_kst=date_kst,
+            created_at_iso=created_at_iso,
+            cap_by_symbol=self._cap_by_symbol,
+            symbol_returns=symbol_returns,
+            rs_passed=rs_passed,
+            rs_ranks=rs_ranks,
+            rs_top_pct=self.settings.rs_top_pct,
+            features=features,
+            final_s1=final_s1,
+            final_s2=final_s2,
+            histories=histories,
+            symbol_names=effective_names,
+        )
+
+        return DualUniverseBuildResult(
+            date_kst=date_kst,
+            created_at_iso=created_at_iso,
+            cache_s1=UniverseCache(
+                date_kst=date_kst,
+                strategy_mode=1,
+                created_at_iso=created_at_iso,
+                symbols=final_s1,
+            ),
+            cache_s2=UniverseCache(
+                date_kst=date_kst,
+                strategy_mode=2,
+                created_at_iso=created_at_iso,
+                symbols=final_s2,
+            ),
+            xlsx_rows=xlsx_rows,
+            first_filter_count=len(filtered),
+            rs_passed_count=len(rs_passed),
+        )
+
+    def _collect_histories(
+        self,
+        symbols: List[str],
+        *,
+        bootstrap: bool,
+    ) -> Dict[str, SymbolHistory]:
+        if self.history_store is not None:
+            if bootstrap:
+                self.history_store.bootstrap_all(symbols)
+            else:
+                self.history_store.update_all(symbols)
+            return self.history_store.load_histories(symbols)
+        return self._fetch_histories(symbols)
 
     # ------------------------------------------------------------------
     # Private steps
