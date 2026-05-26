@@ -58,6 +58,7 @@ moa/
 │   ├── trading_day.py        # 휴장일 판단
 │   ├── universe_builder.py   # 유니버스 빌더 (1차/RS/2차 필터 파이프라인)
 │   ├── universe_cache.py     # 당일 유니버스 캐시
+│   ├── open_positions.py     # 기존 보유 종목 조회 (매수 감시 제외)
 │   ├── naver_universe.py     # 네이버 종목 스크래핑
 │   ├── naver_symbol_master.py
 │   ├── result_csv.py
@@ -73,6 +74,7 @@ moa/
 │   ├── test_universe_builder.py  # 38개 테스트
 │   ├── test_naver_universe.py
 │   ├── test_strategy.py
+│   ├── test_open_positions.py
 │   ├── test_result_fifo.py
 │   └── test_trading_day.py
 ├── .cursorrules
@@ -305,11 +307,19 @@ python -m pytest -q
 | 4 | SIM_MODE / live 모드 — 운영 메모 (실매매 전환 시 변경) | 📝 메모만 |
 | 5 | vol_ma20=0 종목 필터 추가 | ✅ 완료 |
 | 6 | build_universe 사전 실행 — 운영 메모 | 📝 메모만 |
+| 7 | 보유 종목 다음날 매수 감시 제외 | ✅ 완료 |
 
-#### 다음 작업 (1·2번)
+#### 다음 새 채팅에서 이어갈 작업 (1·2번)
 
 - **1번**: 2단계 수집(RS 14p → 통과 171×30p) 또는 증분 캐시 설계·구현
 - **2번**: 전략1·2 유니버스·캐시·감시·매수 분리
+
+#### 기타 완료 (Phase 4 후속)
+
+**보유 종목 매수 감시 제외** ✅
+- **당일**: `watchlist_symbols()` — `bought=True` 종목 제외 (기존)
+- **다음날**: `prepare_universe()` 후 KIS 잔고 또는 SIM `trades.csv` FIFO로 보유 조회 → 매수 감시 제외, 트레일링 스탑은 유지
+- **파일**: `core/open_positions.py`, `core/strategy.py` (`apply_open_position`), `main.py`
 
 ---
 

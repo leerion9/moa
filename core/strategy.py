@@ -61,6 +61,28 @@ class W52HighStrategy:
         state.qty = qty
         state.peak_price = buy_price
 
+    def apply_open_position(
+        self,
+        symbol: str,
+        buy_price: int,
+        qty: int,
+        *,
+        w52_high: int = 0,
+        vol_ma20: int = 0,
+    ) -> None:
+        """전일·기존 보유: 매수 감시 제외, 트레일링 스탑만 추적."""
+        if symbol not in self.symbol_state:
+            self.symbol_state[symbol] = SymbolState(
+                w52_high=max(w52_high, 1),
+                vol_ma20=max(vol_ma20, MIN_VOL_MA20),
+            )
+        state = self.symbol_state[symbol]
+        state.bought = True
+        state.buy_price = buy_price
+        state.qty = qty
+        if state.peak_price <= 0 and buy_price > 0:
+            state.peak_price = buy_price
+
     def on_quote(self, symbol: str, current_price: int, current_volume: int) -> Optional[EntrySignal]:
         """
         장중 시세 수신 시 매수 신호 체크.

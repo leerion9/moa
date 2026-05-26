@@ -16,6 +16,7 @@ from core.trading_day import should_run_bot_today_kst
 from core.universe_builder import UniverseBuilder
 from core.universe_cache import (
     CachedSymbol,
+    MIN_VOL_MA20,
     UniverseCache,
     cache_path,
     load_cache,
@@ -125,10 +126,12 @@ class MoaRunner:
         cache_date = today_kst_yyyymmdd(self._now_kst())
         ucache_path = cache_path(Path("data"), cache_date)
         cached = load_cache(ucache_path, strategy_mode=settings.strategy_mode)
+        universe_symbols: Dict[str, CachedSymbol] = {}
 
         if cached is not None and cached.date_kst == cache_date:
-            self.watchlist = list(cached.symbols.keys())
-            for symbol, feat in cached.symbols.items():
+            universe_symbols = dict(cached.symbols)
+            self.watchlist = list(universe_symbols.keys())
+            for symbol, feat in universe_symbols.items():
                 self.strategy.register(
                     symbol=symbol,
                     w52_high=feat.w52_high,
@@ -153,8 +156,9 @@ class MoaRunner:
                 )
                 new_cache = builder.build(now_kst=self._now_kst())
                 save_cache(ucache_path, new_cache)
-                self.watchlist = list(new_cache.symbols.keys())
-                for symbol, feat in new_cache.symbols.items():
+                universe_symbols = dict(new_cache.symbols)
+                self.watchlist = list(universe_symbols.keys())
+                for symbol, feat in universe_symbols.items():
                     self.strategy.register(
                         symbol=symbol,
                         w52_high=feat.w52_high,
@@ -167,10 +171,56 @@ class MoaRunner:
                 self.logger.error(f"유니버스 빌드 실패: {exc}. 감시 목록 비어 있습니다.")
                 self.watchlist = []
 
+        self._apply_open_positions(universe_symbols)
+
         self.logger.info(
             f"감시 준비 완료. 종목={len(self.watchlist)}개 "
             f"전략={settings.strategy_mode} "
             f"({settings.monitor_start_hhmm}~{settings.monitor_end_hhmm} KST)"
+        )
+
+    def _load_open_positions(self) -> Dict[str, object]:
+        from core.open_positions import (
+            load_open_positions_from_kis,
+            load_open_positions_from_trades_csv,
+        )
+
+        try:
+            if settings.sim_mode:
+                return load_open_positions_from_trades_csv(self.logger.trade_csv)
+            return load_open_positions_from_kis(self.api)
+        except Exception as exc:
+            self.logger.error(f"보유 종목 조회 실패: {exc}")
+            return {}
+
+    def _apply_open_positions(self, universe_symbols: Dict[str, CachedSymbol]) -> None:
+        """기존 보유 종목은 매수 감시에서 제외하고 트레일링 스탑만 추적."""
+        open_pos = self._load_open_positions()
+        if not open_pos:
+            return
+
+        before = len(self.watchlist)
+        held_syms: List[str] = []
+        for sym, pos in sorted(open_pos.items()):
+            feat = universe_symbols.get(sym)
+            w52 = feat.w52_high if feat else 0
+            vol = feat.vol_ma20 if feat else MIN_VOL_MA20
+            self.strategy.apply_open_position(
+                sym,
+                pos.avg_buy_price,
+                pos.qty,
+                w52_high=w52,
+                vol_ma20=vol,
+            )
+            held_syms.append(sym)
+            if sym not in self.positions:
+                self.positions.append(sym)
+
+        held_set = set(held_syms)
+        self.watchlist = [s for s in self.watchlist if s not in held_set]
+        self.logger.info(
+            f"보유 종목 매수 감시 제외: {len(held_set)}종목 {held_syms} "
+            f"(watchlist {before}→{len(self.watchlist)})"
         )
 
     def _monitor_watchlist(self) -> None:
