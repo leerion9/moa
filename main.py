@@ -298,7 +298,9 @@ class MoaRunner:
                 self.logger.error("per_symbol_budget 이상. 감시만 진행합니다.")
                 return
 
-        can_buy = self.buy_orders_today < settings.max_positions
+        # TODO(live): restore max_positions cap before real-money trading.
+        # can_buy = self.buy_orders_today < settings.max_positions
+        can_buy = True
 
         self._hb_cycles += 1
         for symbol in self.strategy.watchlist_symbols():
@@ -330,8 +332,8 @@ class MoaRunner:
                 "note": f"strategy={signal.strategy_mode or self.symbol_strategies.get(symbol, 0)}",
             })
 
-            if not can_buy:
-                continue
+            # if not can_buy:
+            #     continue
 
             if not settings.sim_mode and signal.entry_price > budget:
                 self.logger.log_signal({
@@ -406,8 +408,8 @@ class MoaRunner:
                 + (f" ord_no={ord_no}" if not settings.sim_mode else "")
             )
             self._hb_buys += 1
-            if self.buy_orders_today >= settings.max_positions:
-                can_buy = False
+            # if self.buy_orders_today >= settings.max_positions:
+            #     can_buy = False
             time.sleep(0.15)
 
         self._maybe_heartbeat(
@@ -529,9 +531,15 @@ class MoaRunner:
             return
         try:
             from datetime import timedelta
+            from core.history_cache import HistoryCacheStore
             from core.naver_symbol_master import load_or_refresh_symbol_master
             from core.result_csv import build_daily_rows_from_kis_range
-            from core.result_xlsx import append_result_xlsx_rows, paper_trades_to_execs
+            from core.result_xlsx import (
+                append_result_xlsx_rows,
+                paper_trades_to_execs,
+                update_result_price_track,
+            )
+            from core.universe_xlsx import update_universe_price_track
 
             if settings.sim_mode:
                 execs = paper_trades_to_execs(self._paper_trades)
@@ -552,13 +560,33 @@ class MoaRunner:
                 max_age_days=settings.symbol_master_max_age_days,
                 delay_sec=settings.naver_http_delay_sec,
             )
-            append_result_xlsx_rows(
-                settings.result_xlsx_path, daily_rows, names,
-                kis_symbol_names=kis_names,
-                strategy_mode=settings.strategy_mode,
-                symbol_strategies=self.symbol_strategies,
+            if daily_rows:
+                append_result_xlsx_rows(
+                    settings.result_xlsx_path, daily_rows, names,
+                    kis_symbol_names=kis_names,
+                    strategy_mode=settings.strategy_mode,
+                    symbol_strategies=self.symbol_strategies,
+                )
+
+            history_store = HistoryCacheStore(
+                settings.history_cache_dir,
+                delay_sec=settings.naver_http_delay_sec,
+                jitter_sec=settings.naver_request_jitter_sec,
+                batch_size=settings.naver_batch_size,
+                batch_pause_sec=settings.naver_batch_pause_sec,
+                api=self.api,
             )
-            self.logger.info(f"result.xlsx 갱신: {ymd} ({len(daily_rows)}건)")
+            holiday_path = settings.holiday_dates_path
+            result_track = update_result_price_track(
+                settings.result_xlsx_path, ymd, history_store, holiday_path
+            )
+            universe_track = update_universe_price_track(
+                settings.universe_xlsx_path, ymd, history_store, holiday_path
+            )
+            self.logger.info(
+                f"result.xlsx 갱신: {ymd} ({len(daily_rows)}건) "
+                f"track(result={result_track}, universe={universe_track})"
+            )
         except Exception as exc:
             self.logger.error(f"result.xlsx 실패: {exc}")
 

@@ -13,10 +13,25 @@ reasult_01.xlsx 양식 기준 구조:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 import openpyxl
+
+from core.trading_day import load_manual_holiday_set
+from core.xlsx_price_track import (
+    TRACK_HEADERS,
+    entry_plus_trading_days,
+    get_daily_high_from_bars,
+    normalize_symbol,
+    pct_vs_ref,
+    write_pct_cell,
+    write_ref_price_cell,
+    ymd_to_date,
+)
+
+if TYPE_CHECKING:
+    from core.history_cache import HistoryCacheStore
 
 KST = ZoneInfo("Asia/Seoul")
 
@@ -25,7 +40,7 @@ HEADERS = [
     "종목코드", "종목명", "매수단가", "매수수량", "총매수금액",
     "매도단가", "매도수량", "총매도금액", "손익", "수익률",
     "세금", "수수료", "누적손익", "성공률", "평균수익률", "매매전략",
-]
+] + TRACK_HEADERS
 
 _SHEET_NAME = "result_all"
 
@@ -33,9 +48,19 @@ _SHEET_NAME = "result_all"
 _COL = {h: i for i, h in enumerate(HEADERS, 1)}
 
 
+def _ensure_track_headers(ws) -> None:
+    for col_idx, h in enumerate(TRACK_HEADERS, len(HEADERS) - len(TRACK_HEADERS) + 1):
+        if ws.cell(2, col_idx).value != h:
+            ws.cell(2, col_idx).value = h
+
+
 def ensure_result_xlsx(path: Path) -> None:
     """파일이 없을 때만 신규 생성 (AVERAGE 공식 행 + 헤더 행)."""
     if path.exists():
+        wb = openpyxl.load_workbook(path)
+        ws = wb.active
+        _ensure_track_headers(ws)
+        wb.save(path)
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     wb = openpyxl.Workbook()
@@ -166,7 +191,64 @@ def append_result_xlsx_rows(
             ws.cell(row_num, _COL["평균수익률"]).value = f"=O{row_num}/100"
             ws.cell(row_num, _COL["매매전략"]).value = row_strategy
 
+        buy_ref = int(round(float(r["buy_avg"])))
+        write_ref_price_cell(ws.cell(row_num, _COL["n"]), buy_ref)
+
     wb.save(path)
+
+
+def update_result_price_track(
+    path: Path,
+    as_of_ymd: str,
+    history_store: "HistoryCacheStore",
+    holiday_path: Path,
+) -> int:
+    """Fill/backfill n+1..n+15 for trade rows. Returns updated cell count."""
+    if not path.exists():
+        return 0
+
+    holidays = load_manual_holiday_set(holiday_path)
+    wb = openpyxl.load_workbook(path)
+    ws = wb.active
+    _ensure_track_headers(ws)
+    updated = 0
+
+    for row_idx in range(3, ws.max_row + 1):
+        if ws.cell(row_idx, _COL["번호"]).value is None:
+            continue
+
+        entry_ymd = ymd_to_date(ws.cell(row_idx, _COL["매수날짜"]).value)
+        symbol = normalize_symbol(ws.cell(row_idx, _COL["종목코드"]).value)
+        if not entry_ymd or not symbol:
+            continue
+
+        ref_raw = ws.cell(row_idx, _COL["n"]).value
+        if ref_raw is None:
+            ref_raw = ws.cell(row_idx, _COL["매수단가"]).value
+        try:
+            ref = int(round(float(ref_raw or 0)))
+        except Exception:
+            ref = 0
+        if ref <= 0:
+            continue
+
+        hist = history_store.load_history(symbol)
+        bars = list(hist.bars) if hist and hist.bars else []
+
+        for k in range(1, 16):
+            target_ymd = entry_plus_trading_days(entry_ymd, k, holidays)
+            if target_ymd > as_of_ymd:
+                break
+            high = get_daily_high_from_bars(bars, target_ymd)
+            if high is None:
+                continue
+            pct = pct_vs_ref(high, ref)
+            col = _COL[f"n+{k}"]
+            write_pct_cell(ws.cell(row_idx, col), pct)
+            updated += 1
+
+    wb.save(path)
+    return updated
 
 
 def paper_trades_to_execs(paper_trades: List[Dict[str, Any]]) -> list:

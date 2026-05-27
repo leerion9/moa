@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import openpyxl
+
 from core.api_client import SymbolHistory
 from core.universe_builder import build_universe_xlsx_rows
 from core.universe_cache import CachedSymbol
@@ -51,20 +53,20 @@ def test_append_universe_xlsx_rows(tmp_path: Path):
             "market_cap_billion": 500000,
             "rs_return_pct": 25.0,
             "rs_rank": 1,
-            "rs_top_pct": 0.10,
             "w52_high": 80000,
             "vol_ma20": 1000,
-            "w52_hit_60d": 0,
-            "w52_hit_10d": 0,
             "close": 79000,
-            "bar_count": 300,
-            "rs_passed": "Y",
-            "watchlisted": "Y",
-            "created_at_iso": "2026-05-26T08:40:00+09:00",
         }
     ]
     append_universe_xlsx_rows(path, rows)
     assert path.exists()
     assert read_max_no(path) == 1
+
+    wb = openpyxl.load_workbook(path)
+    ws = wb.active
+    assert ws.cell(2, 12).value == "n"
+    assert ws.cell(3, 9).value == 80000
+    assert ws.cell(3, 12).value == 80000
+
     append_universe_xlsx_rows(path, rows)
     assert read_max_no(path) == 2
