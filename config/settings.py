@@ -121,6 +121,10 @@ class Settings:
         return self.log_dir / "universe.xlsx"
 
     @property
+    def vi_universe_xlsx_path(self) -> Path:
+        return self.log_dir / "vi_universe.xlsx"
+
+    @property
     def cano(self) -> str:
         if "-" in self.account_no:
             return self.account_no.split("-", maxsplit=1)[0].strip()

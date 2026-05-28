@@ -892,6 +892,148 @@ class KISApiClient:
             rows = self._fetch_inquire_daily_ccld(start_yyyymmdd, end_yyyymmdd, tid2)
         return rows
 
+    def inquire_vi_status(
+        self,
+        date_yyyymmdd: str,
+        *,
+        div_cls_code: str = "0",
+        rank_sort_cls_code: str = "0",
+        mrkt_cls_code: str = "0",
+        symbol: str = "",
+        tr_cont: str = "",
+    ) -> tuple[List[Dict[str, object]], str]:
+        """
+        KIS: 변동성완화장치(VI) 현황 — FHPST01390000.
+
+        div_cls_code: 0=전체, 1=상승, 2=하락
+        rank_sort_cls_code: 0=전체, 1=정적, 2=동적, 3=정적&동적
+        mrkt_cls_code: 0=전체, K=거래소, Q=코스닥
+        """
+        url = f"{self.settings.base_url}/uapi/domestic-stock/v1/quotations/inquire-vi-status"
+        params = {
+            "FID_DIV_CLS_CODE": div_cls_code,
+            "FID_COND_SCR_DIV_CODE": "20139",
+            "FID_MRKT_CLS_CODE": mrkt_cls_code,
+            "FID_INPUT_ISCD": symbol,
+            "FID_RANK_SORT_CLS_CODE": rank_sort_cls_code,
+            "FID_INPUT_DATE_1": date_yyyymmdd,
+            "FID_TRGT_CLS_CODE": "",
+            "FID_TRGT_EXLS_CLS_CODE": "",
+        }
+        data = self._request_get_json(
+            url,
+            tr_id="FHPST01390000",
+            params=params,
+            error_prefix=f"KIS VI status request failed ({date_yyyymmdd})",
+        )
+        output = data.get("output", [])
+        if isinstance(output, dict):
+            output = [output]
+        rows = [dict(r) for r in (output or []) if isinstance(r, dict)]
+        next_cont = str(data.get("tr_cont", "") or "")
+        if tr_cont:
+            _ = tr_cont
+        return rows, next_cont
+
+    def inquire_vi_status_all(
+        self,
+        date_yyyymmdd: str,
+        *,
+        div_cls_code: str = "0",
+        rank_sort_cls_code: str = "0",
+        mrkt_cls_code: str = "0",
+    ) -> List[Dict[str, object]]:
+        """Paginate inquire_vi_status until tr_cont != 'M'."""
+        all_rows: List[Dict[str, object]] = []
+        tr_cont = ""
+        for _ in range(50):
+            rows, tr_cont = self.inquire_vi_status(
+                date_yyyymmdd,
+                div_cls_code=div_cls_code,
+                rank_sort_cls_code=rank_sort_cls_code,
+                mrkt_cls_code=mrkt_cls_code,
+                tr_cont=tr_cont,
+            )
+            all_rows.extend(rows)
+            if tr_cont != "M":
+                break
+            time.sleep(self._kis_rate_sleep())
+        return all_rows
+
+    def get_intraday_minute_bars(
+        self,
+        symbol: str,
+        *,
+        end_hhmmss: str = "153000",
+    ) -> List[Dict[str, object]]:
+        """
+        KIS: 주식당일분봉조회 — FHKST03010200.
+        Returns minute bars oldest-first for the session (up to end_hhmmss).
+        """
+        url = (
+            f"{self.settings.base_url}/uapi/domestic-stock/v1/quotations/"
+            "inquire-time-itemchartprice"
+        )
+        merged: Dict[str, Dict[str, object]] = {}
+        cursor = end_hhmmss
+        for _ in range(20):
+            params = {
+                "FID_COND_MRKT_DIV_CODE": "J",
+                "FID_INPUT_ISCD": symbol,
+                "FID_INPUT_HOUR_1": cursor,
+                "FID_PW_DATA_INCU_YN": "Y",
+                "FID_ETC_CLS_CODE": "",
+            }
+            data = self._request_get_json(
+                url,
+                tr_id="FHKST03010200",
+                params=params,
+                error_prefix=f"KIS minute chart request failed ({symbol})",
+            )
+            output2 = data.get("output2", [])
+            if isinstance(output2, dict):
+                output2 = [output2]
+            batch = [dict(r) for r in (output2 or []) if isinstance(r, dict)]
+            if not batch:
+                break
+            for bar in batch:
+                hhmmss = _normalize_hhmmss(str(bar.get("stck_cntg_hour", "") or ""))
+                if not hhmmss:
+                    continue
+                merged[hhmmss] = {
+                    "hhmmss": hhmmss,
+                    "price": _safe_abs_int(bar.get("stck_prpr")),
+                    "high": _safe_abs_int(bar.get("stck_hgpr")),
+                    "low": _safe_abs_int(bar.get("stck_lwpr")),
+                    "acml_tr_pbmn": _safe_abs_int(bar.get("acml_tr_pbmn")),
+                }
+            earliest = min(merged.keys())
+            if earliest <= "090000" or len(batch) < 30:
+                break
+            cursor = _decrement_hhmmss(earliest, minutes=1)
+            if cursor >= earliest:
+                break
+        return [merged[k] for k in sorted(merged.keys())]
+
+
+def _normalize_hhmmss(raw: str) -> str:
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    if len(digits) >= 6:
+        return digits[:6]
+    if len(digits) == 4:
+        return digits + "00"
+    if len(digits) == 5:
+        return digits + "0"
+    return ""
+
+
+def _decrement_hhmmss(hhmmss: str, *, minutes: int = 1) -> str:
+    from datetime import datetime, timedelta
+
+    dt = datetime.strptime(hhmmss, "%H%M%S")
+    dt -= timedelta(minutes=minutes)
+    return dt.strftime("%H%M%S")
+
 
 def _response_header_ci(resp: requests.Response, name: str) -> str:
     want = name.lower()
