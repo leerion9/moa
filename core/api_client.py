@@ -5,12 +5,19 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email.utils import parsedate_to_datetime
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import requests
 from zoneinfo import ZoneInfo
 
 from config.settings import Settings
+from core.kis_token_cache import (
+    CachedKISToken,
+    load_token_cache,
+    new_token_expiry,
+    save_token_cache,
+)
 
 _log = logging.getLogger("moa")
 
@@ -75,10 +82,51 @@ class KISApiClient:
         self._last_cap_list_names: Dict[str, str] = {}
 
     def _token_is_valid(self) -> bool:
-        return bool(self.token) and self.token_expire_at is not None and datetime.now() < self.token_expire_at
+        if not self.token or self.token_expire_at is None:
+            return False
+        from core.kis_token_cache import is_token_usable
+        return is_token_usable(self.token_expire_at)
+
+    def _load_cached_token(self) -> bool:
+        path = getattr(self.settings, "kis_token_cache_path", None)
+        if path is None:
+            return False
+        cached = load_token_cache(
+            Path(path),
+            mode=self.settings.mode_name,
+            app_key=self.settings.app_key,
+        )
+        if cached is None:
+            return False
+        self._apply_cached_token(cached)
+        return True
+
+    def _apply_cached_token(self, cached: CachedKISToken) -> None:
+        self.token = cached.access_token
+        self.token_expire_at = cached.expire_at
+
+    def _persist_token(self) -> None:
+        path = getattr(self.settings, "kis_token_cache_path", None)
+        if path is None or not self.token or self.token_expire_at is None:
+            return
+        save_token_cache(
+            Path(path),
+            mode=self.settings.mode_name,
+            app_key=self.settings.app_key,
+            access_token=self.token,
+            expire_at=self.token_expire_at,
+        )
 
     def ensure_token(self) -> None:
         if self._token_is_valid():
+            return
+
+        if self._load_cached_token():
+            _log.info(
+                "KIS token reused from cache (mode=%s, expires=%s)",
+                self.settings.mode_name,
+                self.token_expire_at.strftime("%Y-%m-%d %H:%M:%S") if self.token_expire_at else "?",
+            )
             return
 
         url = f"{self.settings.base_url}/oauth2/tokenP"
@@ -97,7 +145,13 @@ class KISApiClient:
         self._update_server_time_offset_from_response(resp)
         data = resp.json()
         self.token = data["access_token"]
-        self.token_expire_at = datetime.now() + timedelta(hours=23)
+        self.token_expire_at = new_token_expiry()
+        self._persist_token()
+        _log.info(
+            "KIS token issued (mode=%s, expires=%s)",
+            self.settings.mode_name,
+            self.token_expire_at.strftime("%Y-%m-%d %H:%M:%S"),
+        )
 
     def server_time_offset_sec(self) -> float:
         return float(self._server_time_offset_sec or 0.0)

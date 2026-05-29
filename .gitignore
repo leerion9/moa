@@ -19,6 +19,7 @@ data/history_cache/
 data/positions.json
 data/kr_symbol_master.json
 data/symbol_names.json
+data/kis_token_cache.json
 
 # IDE
 .vscode/
