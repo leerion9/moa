@@ -112,10 +112,24 @@ def compute_rs_top_pct(
     return [sym for sym, _ in ranked[:cutoff]]
 
 
+def is_excluded_by_w52_price_gap(
+    current_close: int,
+    w52_high: int,
+    max_gap_pct: float,
+) -> bool:
+    """True if current is max_gap_pct or more below 52w high (30% gap -> exclude at >=30%)."""
+    if w52_high <= 0 or current_close <= 0:
+        return True
+    gap = (w52_high - current_close) / w52_high
+    return gap >= max_gap_pct
+
+
 def build_features(
     history: SymbolHistory,
     fresh_days: int,
     cont_days: int,
+    *,
+    max_w52_gap_pct: float = 0.30,
 ) -> Optional[CachedSymbol]:
     """
     SymbolHistory에서 CachedSymbol 피처를 계산.
@@ -135,6 +149,10 @@ def build_features(
 
     vol_ma20 = calc_vol_ma(history.bars, days=20)
     if vol_ma20 < MIN_VOL_MA20:
+        return None
+
+    current_close = int(history.bars[0].get("close", 0) or 0)
+    if is_excluded_by_w52_price_gap(current_close, history.w52_high, max_w52_gap_pct):
         return None
 
     return CachedSymbol(
@@ -581,6 +599,7 @@ class UniverseBuilder:
                 hist,
                 fresh_days=self.settings.w52_fresh_days,
                 cont_days=self.settings.w52_cont_lookback_days,
+                max_w52_gap_pct=self.settings.w52_max_gap_pct,
             )
             if feat is not None:
                 features[sym] = feat

@@ -48,6 +48,8 @@ class Settings:
     # 전략2: 추세 지속 (최근 N일 내 52주 신고가 M회 이상)
     w52_cont_lookback_days: int = int(os.getenv("W52_CONT_LOOKBACK_DAYS", "10") or "10")
     w52_cont_min_hits: int = int(os.getenv("W52_CONT_MIN_HITS", "5") or "5")
+    # 유니버스: 전일 종가가 52주 신고가 대비 이 비율(0.30=30%) 이상 낮으면 제외
+    w52_max_gap_pct: float = float(os.getenv("W52_MAX_GAP_PCT", "0.30") or "0.30")
 
     # --- 매도 조건 ---
     trailing_stop_pct: float = float(os.getenv("TRAILING_STOP_PCT", "0.075") or "0.075")   # 고점 대비 -7.5% 손절
@@ -162,6 +164,8 @@ class Settings:
             raise ValueError("STRATEGY_MODE는 1 또는 2여야 합니다.")
         if not (0.0 < self.trailing_stop_pct < 1.0):
             raise ValueError("TRAILING_STOP_PCT는 0~1 사이여야 합니다. 예: 0.075")
+        if not (0.0 <= self.w52_max_gap_pct < 1.0):
+            raise ValueError("W52_MAX_GAP_PCT는 0~1 사이(1 미만)여야 합니다. 예: 0.30")
         if self.result_csv_kis_lookback_days < 1 or self.result_csv_kis_lookback_days > 90:
             raise ValueError("RESULT_CSV_KIS_LOOKBACK_DAYS는 1~90이어야 합니다.")
 

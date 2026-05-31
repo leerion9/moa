@@ -97,6 +97,31 @@ def is_upward_vi(row: Dict[str, object]) -> bool:
     return True
 
 
+def trigger_vs_release_pct(trigger_price: int, release_price: int) -> Optional[float]:
+    if trigger_price <= 0 or release_price <= 0:
+        return None
+    return round((release_price / trigger_price - 1.0) * 100.0, 1)
+
+
+def trading_value_to_billion_won(value: Optional[int]) -> Optional[int]:
+    """원 단위 거래대금 -> 억 단위 정수 (소수 버림)."""
+    if value is None or value <= 0:
+        return None
+    return int(value) // 100_000_000
+
+
+def cap_vs_trading_value_pct(
+    market_cap_billion: Optional[int],
+    pre_vi_trading_value: Optional[int],
+) -> Optional[float]:
+    if not market_cap_billion or market_cap_billion <= 0:
+        return None
+    if not pre_vi_trading_value or pre_vi_trading_value <= 0:
+        return None
+    cap_won = int(market_cap_billion) * 100_000_000
+    return round(pre_vi_trading_value / cap_won * 100.0, 1)
+
+
 def market_cap_group(cap_billion: Optional[int]) -> str:
     if cap_billion is None or cap_billion <= 0:
         return ""
@@ -121,7 +146,7 @@ def select_static_upward_first_vi(
     dynamic_rows: Sequence[Dict[str, object]],
 ) -> List[Dict[str, object]]:
     """
-    Return one raw KIS row per symbol: first static upward VI (vi_count==1),
+    Return one raw KIS row per symbol: earliest static upward VI by trigger time,
     excluding symbols with any dynamic VI that day.
     """
     dynamic_symbols = {
@@ -141,21 +166,17 @@ def select_static_upward_first_vi(
         by_symbol.setdefault(sym, []).append(row)
 
     selected: List[Dict[str, object]] = []
-    for sym, rows in by_symbol.items():
+    for rows in by_symbol.values():
         ordered = sorted(rows, key=lambda r: normalize_hhmmss(r.get("cntg_vi_hour", "")))
-        first_candidates = [r for r in ordered if _safe_int(r.get("vi_count")) == 1]
-        if first_candidates:
-            selected.append(first_candidates[0])
-            continue
         if ordered:
             selected.append(ordered[0])
     return sorted(selected, key=lambda r: normalize_hhmmss(r.get("cntg_vi_hour", "")))
 
 
-def has_second_static_upward_vi(
+def static_upward_events_for_symbol(
     symbol: str,
     static_up_rows: Sequence[Dict[str, object]],
-) -> bool:
+) -> List[Dict[str, object]]:
     sym = normalize_symbol(symbol)
     hits = [
         r for r in static_up_rows
@@ -163,9 +184,55 @@ def has_second_static_upward_vi(
         and is_static_vi(r)
         and is_upward_vi(r)
     ]
-    if len(hits) >= 2:
-        return True
-    return any(_safe_int(r.get("vi_count")) >= 2 for r in hits)
+    return sorted(hits, key=lambda r: normalize_hhmmss(r.get("cntg_vi_hour", "")))
+
+
+def find_second_static_upward_vi(
+    first_row: Dict[str, object],
+    static_up_rows: Sequence[Dict[str, object]],
+) -> Optional[Dict[str, object]]:
+    sym = normalize_symbol(first_row.get("mksc_shrn_iscd", first_row.get("stck_shrn_iscd", "")))
+    first_time = normalize_hhmmss(first_row.get("cntg_vi_hour", ""))
+    for row in static_upward_events_for_symbol(sym, static_up_rows):
+        t = normalize_hhmmss(row.get("cntg_vi_hour", ""))
+        if t and first_time and t > first_time:
+            return row
+    return None
+
+
+def max_high_after_hhmmss(
+    bars: Sequence[Dict[str, object]],
+    hhmmss: str,
+    *,
+    inclusive: bool = True,
+) -> int:
+    segment = bars_after(bars, hhmmss, inclusive=inclusive)
+    segment = [
+        b for b in segment
+        if SESSION_OPEN_HHMMSS <= normalize_hhmmss(b.get("hhmmss", "")) <= MARKET_CLOSE_HHMMSS
+    ]
+    highs = [_safe_int(b.get("high")) for b in segment if _safe_int(b.get("high")) > 0]
+    return max(highs) if highs else 0
+
+
+def has_confirmed_second_static_upward_vi(
+    first_row: Dict[str, object],
+    static_up_rows: Sequence[Dict[str, object]],
+    minute_bars: Sequence[Dict[str, object]],
+) -> bool:
+    """
+    True only if a later static upward VI exists AND after 1st release the minute
+    high reached at least the 2nd VI trigger price (vi_prc).
+    """
+    second = find_second_static_upward_vi(first_row, static_up_rows)
+    if second is None:
+        return False
+    release_hhmmss = normalize_hhmmss(first_row.get("vi_cncl_hour", ""))
+    second_trigger = _safe_int(second.get("vi_prc"))
+    if not release_hhmmss or second_trigger <= 0:
+        return False
+    max_high = max_high_after_hhmmss(minute_bars, release_hhmmss, inclusive=True)
+    return max_high >= second_trigger
 
 
 def find_bar_at_or_before(
@@ -279,7 +346,7 @@ def build_vi_event_row(
         release_hhmmss=release_hhmmss,
         trigger_price=trigger_price,
         release_price=release_price,
-        has_second_vi=has_second_static_upward_vi(sym, static_up_rows),
+        has_second_vi=has_confirmed_second_static_upward_vi(raw, static_up_rows, minute_bars),
         post_release_high_pct=high_pct,
         post_release_low_pct=low_pct,
         market_cap_billion=market_cap_billion,

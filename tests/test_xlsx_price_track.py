@@ -13,6 +13,7 @@ from core.result_xlsx import append_result_xlsx_rows, update_result_price_track
 from core.universe_xlsx import append_universe_xlsx_rows, update_universe_price_track
 from core.xlsx_price_track import (
     entry_plus_trading_days,
+    normalize_bar_date_ymd,
     pct_vs_ref,
     ymd_to_date,
 )
@@ -30,6 +31,18 @@ def test_entry_plus_trading_days_skips_weekend():
 
 def test_ymd_to_date_from_date_object():
     assert ymd_to_date(date(2026, 5, 27)) == "20260527"
+
+
+def test_normalize_bar_date_ymd_accepts_dot_and_compact():
+    assert normalize_bar_date_ymd("2026.05.29") == "20260529"
+    assert normalize_bar_date_ymd("20260529") == "20260529"
+
+
+def test_get_daily_high_matches_naver_dot_date():
+    from core.xlsx_price_track import get_daily_high_from_bars
+
+    bars = [{"date": "2026.05.29", "high": 12000, "low": 1, "close": 2, "open": 1, "volume": 1}]
+    assert get_daily_high_from_bars(bars, "20260529") == 12000
 
 
 def _write_history(tmp_path: Path, symbol: str, bars: list[dict]) -> HistoryCacheStore:
@@ -64,7 +77,7 @@ def test_universe_price_track_updates_n_plus(tmp_path: Path):
         tmp_path / "hc",
         "005930",
         [
-            {"date": "20260527", "open": 1, "high": 1100, "low": 1, "close": 2, "volume": 1},
+            {"date": "2026.05.27", "open": 1, "high": 1100, "low": 1, "close": 2, "volume": 1},
         ],
     )
     updated = update_universe_price_track(xlsx_path, "20260527", store, holiday_path)

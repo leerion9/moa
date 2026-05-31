@@ -4,11 +4,15 @@ from __future__ import annotations
 
 from core.vi_collector_logic import (
     build_vi_event_row,
-    has_second_static_upward_vi,
+    cap_vs_trading_value_pct,
+    find_second_static_upward_vi,
+    has_confirmed_second_static_upward_vi,
     market_cap_group,
     post_release_pct_range,
     pre_vi_trading_value,
     select_static_upward_first_vi,
+    trading_value_to_billion_won,
+    trigger_vs_release_pct,
 )
 
 
@@ -43,6 +47,14 @@ def test_market_cap_groups():
     assert market_cap_group(100001) == "G"
 
 
+def test_vi_derived_metrics():
+    assert trigger_vs_release_pct(10000, 10500) == 5.0
+    assert trigger_vs_release_pct(10000, 9500) == -5.0
+    assert trading_value_to_billion_won(3694518165) == 36
+    assert trading_value_to_billion_won(99999999) == 0
+    assert cap_vs_trading_value_pct(1000, 5_000_000_000) == 5.0
+
+
 def test_exclude_dynamic_before_static():
     static = [_static_up("005930", "103000")]
     dynamic = [_dynamic("005930", "101000")]
@@ -54,7 +66,7 @@ def test_exclude_dynamic_before_static():
     assert selected[0]["mksc_shrn_iscd"] == "005930"
 
 
-def test_select_first_static_upward_only():
+def test_select_earliest_static_upward_by_time():
     static = [
         _static_up("005930", "110000", vi_count=2),
         _static_up("005930", "103000", vi_count=1),
@@ -63,17 +75,28 @@ def test_select_first_static_upward_only():
     selected = select_static_upward_first_vi(static, [])
     assert len(selected) == 2
     by_sym = {r["mksc_shrn_iscd"]: r for r in selected}
-    assert by_sym["005930"]["vi_count"] == 1
     assert by_sym["005930"]["cntg_vi_hour"] == "103000"
 
 
-def test_second_vi_flag():
-    static = [
-        _static_up("005930", "103000", vi_count=1),
-        _static_up("005930", "113000", vi_count=2),
+def test_confirmed_second_vi_requires_price_reach():
+    first = _static_up("005930", "134605", vi_count=2, price=4625)
+    first["vi_stnd_prc"] = 4200
+    first["vi_cncl_hour"] = "134825"
+    second = _static_up("005930", "134829", vi_count=3, price=5300)
+    second["vi_stnd_prc"] = 4770
+    static = [first, second]
+    # Nextchip-like: high after release stays at 5240, below 5300 trigger
+    bars = [
+        {"hhmmss": "134800", "price": 5240, "high": 5240, "low": 4765, "acml_tr_pbmn": 1},
+        {"hhmmss": "134900", "price": 5240, "high": 5240, "low": 5240, "acml_tr_pbmn": 1},
     ]
-    assert has_second_static_upward_vi("005930", static) is True
-    assert has_second_static_upward_vi("035720", static) is False
+    assert find_second_static_upward_vi(first, static) is not None
+    assert has_confirmed_second_static_upward_vi(first, static, bars) is False
+
+    bars_reach = bars + [
+        {"hhmmss": "135000", "price": 5350, "high": 5350, "low": 5240, "acml_tr_pbmn": 1},
+    ]
+    assert has_confirmed_second_static_upward_vi(first, static, bars_reach) is True
 
 
 def test_pre_vi_trading_value_and_post_release_pct():

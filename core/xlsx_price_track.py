@@ -74,11 +74,29 @@ def normalize_symbol(value) -> str:
     return text
 
 
+def normalize_bar_date_ymd(value) -> Optional[str]:
+    """Normalize bar date to YYYYMMDD (Naver: 2026.05.29, KIS: 20260529)."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    digits = "".join(ch for ch in text if ch.isdigit())
+    if len(digits) >= 8:
+        return digits[:8]
+    return None
+
+
 def get_daily_high_from_bars(bars: List[dict], ymd: str) -> Optional[int]:
+    target = normalize_bar_date_ymd(ymd)
+    if not target:
+        return None
     for bar in bars:
-        if str(bar.get("date", "") or "").strip() == ymd:
-            high = int(bar.get("high", 0) or 0)
-            return high if high > 0 else None
+        bar_ymd = normalize_bar_date_ymd(bar.get("date", ""))
+        if bar_ymd != target:
+            continue
+        high = int(bar.get("high", 0) or 0)
+        return high if high > 0 else None
     return None
 
 

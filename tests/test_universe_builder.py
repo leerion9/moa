@@ -15,6 +15,7 @@ from core.universe_builder import (
     UniverseBuilder,
     apply_second_filter,
     build_features,
+    is_excluded_by_w52_price_gap,
     calc_rs_return,
     calc_vol_ma,
     calc_w52_hit_count,
@@ -58,6 +59,7 @@ def _make_settings(**kwargs):
         w52_fresh_days=60,
         w52_cont_lookback_days=10,
         w52_cont_min_hits=5,
+        w52_max_gap_pct=0.30,
         strategy_mode=1,
         naver_http_delay_sec=0.0,
     )
@@ -275,6 +277,19 @@ def test_build_features_zero_vol_ma20_excluded():
     """20일 평균 거래량 0이면 유니버스 제외 (거래량 조건 무력화 방지)."""
     hist = _make_history(w52_high=10000, n_bars=130, volume_per_bar=0)
     assert build_features(hist, fresh_days=60, cont_days=10) is None
+
+
+def test_is_excluded_by_w52_price_gap():
+    assert is_excluded_by_w52_price_gap(7000, 10000, 0.30) is True
+    assert is_excluded_by_w52_price_gap(7001, 10000, 0.30) is False
+    assert is_excluded_by_w52_price_gap(8000, 10000, 0.30) is False
+
+
+def test_build_features_excludes_w52_gap_30pct_or_more():
+    hist = _make_history(w52_high=10000, n_bars=130, close_per_bar=7000)
+    assert build_features(hist, fresh_days=60, cont_days=10, max_w52_gap_pct=0.30) is None
+    hist_ok = _make_history(w52_high=10000, n_bars=130, close_per_bar=7001)
+    assert build_features(hist_ok, fresh_days=60, cont_days=10, max_w52_gap_pct=0.30) is not None
 
 
 # ---------------------------------------------------------------------------

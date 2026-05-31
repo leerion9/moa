@@ -171,7 +171,19 @@ def main(argv: list[str] | None = None) -> int:
         _log.error("설정 오류: %s", exc)
         return 1
 
+    cache_path = settings.kis_token_cache_path
+    _log.info(
+        "KIS token cache: path=%s exists=%s",
+        cache_path,
+        cache_path.is_file(),
+    )
+
     api = KISApiClient(settings)
+    try:
+        api.ensure_token()
+    except Exception as exc:
+        _log.error("KIS token 발급/로드 실패: %s", exc)
+        return 1
     caps, names, markets = _load_market_cap_table(settings.naver_http_delay_sec)
 
     try:
