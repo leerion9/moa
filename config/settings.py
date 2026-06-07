@@ -54,6 +54,17 @@ class Settings:
     # --- 매도 조건 ---
     trailing_stop_pct: float = float(os.getenv("TRAILING_STOP_PCT", "0.075") or "0.075")   # 고점 대비 -7.5% 손절
 
+    # --- 갭상승 회복 전략 (gap_collector) ---
+    gap_min_pct: float = float(os.getenv("GAP_MIN_PCT", "3.0") or "3.0")
+    gap_max_pct: float = float(os.getenv("GAP_MAX_PCT", "9.0") or "9.0")
+    gap_dip_min_pct: float = float(os.getenv("GAP_DIP_MIN_PCT", "3.0") or "3.0")
+    gap_trailing_stop_pct: float = float(os.getenv("GAP_TRAILING_STOP_PCT", "0.05") or "0.05")
+    gap_buy_qty: int = int(os.getenv("GAP_BUY_QTY", "1") or "1")
+    gap_backfill_batch_size: int = int(os.getenv("GAP_BACKFILL_BATCH_SIZE", "30") or "30")
+    gap_naver_tick_delay_sec: float = float(
+        os.getenv("GAP_NAVER_TICK_DELAY_SEC", "0.15") or "0.15"
+    )
+
     # --- 스케줄 ---
     monitor_start_hhmm: str = "09:00"
     monitor_end_hhmm: str = "15:30"
@@ -93,6 +104,8 @@ class Settings:
     naver_batch_pause_sec: float = float(os.getenv("NAVER_BATCH_PAUSE_SEC", "3.0") or "3.0")
     naver_request_jitter_sec: float = float(os.getenv("NAVER_REQUEST_JITTER_SEC", "0.03") or "0.03")
     history_cache_dir: Path = ROOT_DIR / "data" / "history_cache"
+    gap_backfill_dir: Path = ROOT_DIR / "data" / "gap_backfill"
+    gap_backfill_ticks_dir: Path = ROOT_DIR / "data" / "gap_backfill" / "ticks"
 
     holiday_dates_path: Path = Path(
         os.getenv("HOLIDAY_DATES_PATH", str(ROOT_DIR / "config" / "korea_market_holidays.txt"))
@@ -125,6 +138,14 @@ class Settings:
     @property
     def vi_universe_xlsx_path(self) -> Path:
         return self.log_dir / "vi_universe.xlsx"
+
+    @property
+    def gap_result_xlsx_path(self) -> Path:
+        return self.log_dir / "gap_result.xlsx"
+
+    @property
+    def gap_backfill_xlsx_path(self) -> Path:
+        return self.log_dir / "gap_backfill.xlsx"
 
     @property
     def kis_token_cache_path(self) -> Path:
@@ -166,6 +187,18 @@ class Settings:
             raise ValueError("TRAILING_STOP_PCT는 0~1 사이여야 합니다. 예: 0.075")
         if not (0.0 <= self.w52_max_gap_pct < 1.0):
             raise ValueError("W52_MAX_GAP_PCT는 0~1 사이(1 미만)여야 합니다. 예: 0.30")
+        if self.gap_min_pct < 0 or self.gap_max_pct <= self.gap_min_pct:
+            raise ValueError("GAP_MIN_PCT < GAP_MAX_PCT 여야 합니다.")
+        if self.gap_dip_min_pct <= 0 or self.gap_dip_min_pct >= 100:
+            raise ValueError("GAP_DIP_MIN_PCT는 0~100 사이여야 합니다.")
+        if not (0.0 < self.gap_trailing_stop_pct < 1.0):
+            raise ValueError("GAP_TRAILING_STOP_PCT는 0~1 사이여야 합니다. 예: 0.05")
+        if self.gap_buy_qty < 1:
+            raise ValueError("GAP_BUY_QTY는 1 이상이어야 합니다.")
+        if self.gap_backfill_batch_size < 1:
+            raise ValueError("GAP_BACKFILL_BATCH_SIZE는 1 이상이어야 합니다.")
+        if self.gap_naver_tick_delay_sec < 0:
+            raise ValueError("GAP_NAVER_TICK_DELAY_SEC는 0 이상이어야 합니다.")
         if self.result_csv_kis_lookback_days < 1 or self.result_csv_kis_lookback_days > 90:
             raise ValueError("RESULT_CSV_KIS_LOOKBACK_DAYS는 1~90이어야 합니다.")
 
