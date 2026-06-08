@@ -61,6 +61,13 @@
 - **실매매 전환 시**: (1) paper + `SIM_MODE=false` 검증 → (2) live + `SIM_MODE=false`.
 - **보유 종목**: 다음날 매수 감시 제외 (KIS 잔고 / SIM trades.csv). 트레일링 스탑은 계속.
 
+## Phase 5 추가 (README 참고)
+- **VI 수집**: `scripts/vi_collector` → `vi_universe.xlsx` (장마감 후, main 별도)
+- **갭상승 회복 전략**: `gap_collector`(일일/KIS분봉) + `gap_backfill`(과거/네이버체결, `--execute`시만 크롤링)
+- **KIS 토큰 캐시**: `data/kis_token_cache.json` (main/vi_collector 공유)
+- **n+15 가격 추적**: universe/result xlsx
+- **W52 gap 필터**: `W52_MAX_GAP_PCT=0.30`
+
 ## 현재 알려진 이슈 (README Phase 4 참고)
 1. ~~유니버스 빌드 ~64분~~ → **history_cache 증분** ✅
 2. ~~전략1·2 동시 운영~~ → **build_dual + main dual** ✅
@@ -68,3 +75,4 @@
 4. SIM_MODE=true — **운영 메모** (실매매 전환 시 `SIM_MODE=false`)
 5. ~~vol_ma20=0~~ → **MIN_VOL_MA20=1** ✅
 6. ~~보유 종목 다음날 매수 감시 제외~~ → **open_positions** ✅
+7. **max_positions 임시 해제** — n+15 추적용. 실매매 전환 전 복원 필요

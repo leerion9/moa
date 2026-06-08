@@ -29,6 +29,7 @@ from core.gap_backfill_queue import (
     BackfillTask,
     done_keys,
     filter_pending_tasks,
+    in_date_range,
     load_queue,
     mark_done,
     mark_failed,
@@ -39,11 +40,19 @@ from core.gap_backfill_queue import (
     task_key,
     task_to_candidate,
 )
-from core.gap_collector_logic import build_gap_result_row, simulate_gap_trade
+from core.gap_collector_logic import (
+    bar_volume_for_ymd,
+    build_gap_result_row,
+    latest_close_from_bars,
+    simulate_gap_trade,
+)
+from core.naver_universe import fetch_market_cap_list
 from core.gap_naver_ticks import (
-    fetch_all_ticks_for_day,
+    fetch_intraday_minute_bars,
+    load_minute_cache,
     load_ticks_cache,
-    save_ticks_cache,
+    minute_cache_path,
+    save_minute_cache,
     tick_cache_path,
     ticks_to_minute_bars,
 )
@@ -89,7 +98,14 @@ def _collect_skip_keys(xlsx_path: Path, state_dir: Path) -> Set[str]:
     return skip
 
 
-def cmd_plan(year: int) -> int:
+def _parse_ymd_arg(value: str | None) -> str:
+    text = str(value or "").strip().replace("-", "").replace(".", "")
+    if text and (len(text) != 8 or not text.isdigit()):
+        raise ValueError(f"날짜 형식 오류: {value} (YYYYMMDD)")
+    return text
+
+
+def cmd_plan(year: int, *, from_ymd: str = "", to_ymd: str = "") -> int:
     symbols = _list_cached_symbols(settings.history_cache_dir)
     if not symbols:
         _log.error("history_cache 비어 있음. bootstrap 후 plan 실행하세요.")
@@ -106,12 +122,18 @@ def cmd_plan(year: int) -> int:
         gap_min_pct=settings.gap_min_pct,
         gap_max_pct=settings.gap_max_pct,
         skip_keys=skip,
+        from_ymd=from_ymd,
+        to_ymd=to_ymd,
     )
     count = save_queue(settings.gap_backfill_dir, year, tasks)
+    range_note = ""
+    if from_ymd or to_ymd:
+        range_note = f" range={from_ymd or '...'}~{to_ymd or '...'}"
     _log.info(
-        "plan 완료 year=%d candidates=%d queue=%s",
+        "plan 완료 year=%d candidates=%d%s queue=%s",
         year,
         count,
+        range_note,
         settings.gap_backfill_dir / f"queue_{year}.json",
     )
     return 0
@@ -132,27 +154,42 @@ def cmd_status(year: int) -> int:
     return 0
 
 
-def _resolve_ticks(task: BackfillTask, *, execute: bool) -> List[object]:
-    cache_file = tick_cache_path(
+def _resolve_minute_bars(task: BackfillTask, *, execute: bool) -> List[Dict[str, object]]:
+    minute_file = minute_cache_path(
         settings.gap_backfill_ticks_dir,
         task.ymd,
         task.symbol,
     )
-    cached = load_ticks_cache(cache_file)
+    cached = load_minute_cache(minute_file)
     if cached:
         return cached
+
+    tick_file = tick_cache_path(
+        settings.gap_backfill_ticks_dir,
+        task.ymd,
+        task.symbol,
+    )
+    legacy_ticks = load_ticks_cache(tick_file)
+    if legacy_ticks:
+        return ticks_to_minute_bars(legacy_ticks)
 
     if not execute:
         return []
 
-    ticks = fetch_all_ticks_for_day(
+    bars = fetch_intraday_minute_bars(
         task.symbol,
         task.ymd,
         delay_sec=settings.gap_naver_tick_delay_sec,
     )
-    if ticks:
-        save_ticks_cache(cache_file, symbol=task.symbol, ymd=task.ymd, ticks=ticks)
-    return ticks
+    if bars:
+        save_minute_cache(
+            minute_file,
+            symbol=task.symbol,
+            ymd=task.ymd,
+            bars=bars,
+            source="fchart_or_ticks",
+        )
+    return bars
 
 
 def _process_task(
@@ -160,11 +197,13 @@ def _process_task(
     *,
     execute: bool,
     names: Dict[str, str],
+    caps: Dict[str, int],
+    cache_bars: Dict[str, List[Dict[str, object]]],
 ) -> Dict[str, object] | None:
-    ticks = _resolve_ticks(task, execute=execute)
-    if not ticks:
+    minute_bars = _resolve_minute_bars(task, execute=execute)
+    if not minute_bars:
         if execute:
-            _log.warning("  체결 데이터 없음 %s %s", task.symbol, task.ymd)
+            _log.warning("  분봉 데이터 없음 %s %s", task.symbol, task.ymd)
         else:
             _log.info(
                 "  [dry-run] %s %s gap=%.1f%% open=%d (크롤링/캐시 없음)",
@@ -174,8 +213,6 @@ def _process_task(
                 task.open_price,
             )
         return None
-
-    minute_bars = ticks_to_minute_bars(ticks)
     cand = task_to_candidate(task)
     trade = simulate_gap_trade(
         cand.open_price,
@@ -189,6 +226,7 @@ def _process_task(
         _log.info("  시뮬 신호 없음 %s %s", task.symbol, task.ymd)
         return None
 
+    symbol_bars = cache_bars.get(task.symbol, [])
     return build_gap_result_row(
         cand,
         trade,
@@ -197,10 +235,20 @@ def _process_task(
         fee_rate_buy=settings.fee_rate_buy,
         fee_rate_sell=settings.fee_rate_sell,
         tax_rate_sell=settings.tax_rate_sell,
+        daily_volume=bar_volume_for_ymd(symbol_bars, task.ymd),
+        current_price=latest_close_from_bars(symbol_bars),
+        market_cap_billion=caps.get(task.symbol),
     )
 
 
-def cmd_run(year: int, *, limit: int, execute: bool) -> int:
+def cmd_run(
+    year: int,
+    *,
+    limit: int,
+    execute: bool,
+    from_ymd: str = "",
+    to_ymd: str = "",
+) -> int:
     queue = load_queue(settings.gap_backfill_dir, year)
     if not queue:
         _log.error("queue 비어 있음. 먼저: python -m scripts.gap_backfill plan --year %d", year)
@@ -208,6 +256,10 @@ def cmd_run(year: int, *, limit: int, execute: bool) -> int:
 
     skip = _collect_skip_keys(settings.gap_backfill_xlsx_path, settings.gap_backfill_dir)
     pending = filter_pending_tasks(queue, skip_keys=skip)
+    if from_ymd or to_ymd:
+        pending = [
+            t for t in pending if in_date_range(t.ymd, from_ymd=from_ymd, to_ymd=to_ymd)
+        ]
     batch, _rest = pop_tasks(pending, limit)
 
     if not batch:
@@ -224,11 +276,28 @@ def cmd_run(year: int, *, limit: int, execute: bool) -> int:
         delay_sec=settings.naver_http_delay_sec,
     )
 
+    caps: Dict[str, int] = {}
+    cache_bars: Dict[str, List[Dict[str, object]]] = {}
+    if execute:
+        cap_list, cap_names = fetch_market_cap_list(delay_sec=settings.naver_http_delay_sec)
+        caps = {sym: cap for sym, cap in cap_list}
+        for sym, cap_name in cap_names.items():
+            if sym not in names and cap_name:
+                names[sym] = cap_name
+        symbols = sorted({task.symbol for task in batch})
+        cache_bars = _load_cache_bars(settings.history_cache_dir, symbols)
+
     result_rows: List[Dict[str, object]] = []
     for i, task in enumerate(batch, 1):
         _log.info("작업 %d/%d %s", i, len(batch), task.key)
         try:
-            row = _process_task(task, execute=execute, names=names)
+            row = _process_task(
+                task,
+                execute=execute,
+                names=names,
+                caps=caps,
+                cache_bars=cache_bars,
+            )
         except Exception as exc:
             _log.error("  실패 %s: %s", task.key, exc)
             if execute:
@@ -265,9 +334,13 @@ def main(argv: list[str] | None = None) -> int:
 
     p_plan = sub.add_parser("plan", help="history_cache로 연도별 후보 큐 생성 (HTTP 없음)")
     p_plan.add_argument("--year", type=int, required=True, help="예: 2025")
+    p_plan.add_argument("--from", dest="from_ymd", help="시작일 YYYYMMDD")
+    p_plan.add_argument("--to", dest="to_ymd", help="종료일 YYYYMMDD")
 
     p_run = sub.add_parser("run", help="큐에서 N건 처리 (기본 dry-run)")
     p_run.add_argument("--year", type=int, required=True)
+    p_run.add_argument("--from", dest="from_ymd", help="시작일 YYYYMMDD")
+    p_run.add_argument("--to", dest="to_ymd", help="종료일 YYYYMMDD")
     p_run.add_argument(
         "--limit",
         type=int,
@@ -285,13 +358,26 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
 
+    try:
+        from_ymd = _parse_ymd_arg(getattr(args, "from_ymd", None))
+        to_ymd = _parse_ymd_arg(getattr(args, "to_ymd", None))
+    except ValueError as exc:
+        _log.error("%s", exc)
+        return 1
+
     if args.command == "plan":
-        return cmd_plan(args.year)
+        return cmd_plan(args.year, from_ymd=from_ymd, to_ymd=to_ymd)
     if args.command == "status":
         return cmd_status(args.year)
     if args.command == "run":
         limit = args.limit or settings.gap_backfill_batch_size
-        return cmd_run(args.year, limit=limit, execute=args.execute)
+        return cmd_run(
+            args.year,
+            limit=limit,
+            execute=args.execute,
+            from_ymd=from_ymd,
+            to_ymd=to_ymd,
+        )
 
     return 1
 

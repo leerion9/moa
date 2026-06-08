@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from core.gap_collector_logic import (
+    bar_volume_for_ymd,
     calc_trade_amounts,
+    calc_volume_approx_fields,
     find_gap_candidate,
     gap_pct_from_ohlc,
     scan_gap_candidates_from_cache,
@@ -105,3 +107,26 @@ def test_calc_trade_amounts():
     assert amounts["buy_amount"] == 10000
     assert amounts["sell_amount"] == 10500
     assert amounts["pnl"] < 500
+
+
+def test_bar_volume_for_ymd():
+    bars = [
+        {"date": "2025.06.09", "open": 10500, "close": 10600, "volume": 12345},
+        {"date": "2025.06.08", "open": 10000, "close": 10000, "volume": 9000},
+    ]
+    assert bar_volume_for_ymd(bars, "20250609") == 12345
+    assert bar_volume_for_ymd(bars, "20250101") == 0
+
+
+def test_calc_volume_approx_fields():
+    fields = calc_volume_approx_fields(
+        10000,
+        500_000,
+        market_cap_billion=1000,
+        current_price=50000,
+    )
+    assert fields["daily_volume"] == 500_000
+    assert fields["approx_trading_value_won"] == 5_000_000_000
+    assert fields["approx_trading_value_billion"] == 50
+    assert fields["shares_outstanding"] == 2_000_000
+    assert fields["approx_market_cap_billion"] == 200

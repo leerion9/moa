@@ -38,6 +38,10 @@ HEADERS = [
     "시총",
     "거래대금",
     "시총대비거래대금비",
+    "당일거래량",
+    "거래대금(근사)",
+    "발행주식수(현재)",
+    "시총(근사)",
 ]
 
 _COL = {h: i for i, h in enumerate(HEADERS, 1)}
@@ -50,6 +54,10 @@ _ROW1_HINTS: Dict[int, str] = {
     23: "억원",
     24: "억원",
     25: "%",
+    26: "주",
+    27: "억원",
+    28: "주",
+    29: "억원",
 }
 
 
@@ -265,6 +273,19 @@ def append_gap_result_rows(
                 ws.cell(row_num, _COL["시총대비거래대금비"]),
                 cap_vs_trading_value_pct(cap_int, tv_won),
             )
+
+        daily_volume = r.get("daily_volume")
+        if daily_volume is not None:
+            ws.cell(row_num, _COL["당일거래량"]).value = int(daily_volume)
+        approx_tv_billion = r.get("approx_trading_value_billion")
+        if approx_tv_billion is not None:
+            ws.cell(row_num, _COL["거래대금(근사)"]).value = int(approx_tv_billion)
+        shares = r.get("shares_outstanding")
+        if shares is not None:
+            ws.cell(row_num, _COL["발행주식수(현재)"]).value = int(shares)
+        approx_cap = r.get("approx_market_cap_billion")
+        if approx_cap is not None:
+            ws.cell(row_num, _COL["시총(근사)"]).value = int(approx_cap)
 
     wb.save(path)
     return len(rows)

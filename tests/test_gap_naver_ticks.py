@@ -3,12 +3,22 @@
 from __future__ import annotations
 
 from core.gap_naver_ticks import (
+    datetime12_to_hhmmss,
     fetch_all_ticks_for_day,
+    parse_fchart_minute_text,
     parse_sise_time_html,
     thistime_for_ymd,
     ticks_to_minute_bars,
     time_text_to_hhmmss,
 )
+
+_FCHART_SAMPLE = """
+[['날짜', '시가', '고가', '저가', '종가', '거래량', '외국인소진율'],
+["202606051558", null, null, null, 329000, 31299144, null],
+["202606051557", null, null, null, 329500, 31299108, null],
+["202606051556", null, null, null, 329000, 31298457, null],
+]
+"""
 
 _SAMPLE_HTML = """
 <table cellspacing="0" class="type2">
@@ -60,6 +70,19 @@ def test_ticks_to_minute_bars():
     assert bars[0]["hhmmss"] == "102900"
     assert bars[0]["low"] == 13580
     assert bars[1]["high"] == 14000
+
+
+def test_datetime12_to_hhmmss():
+    assert datetime12_to_hhmmss("202606051558") == "155800"
+
+
+def test_parse_fchart_minute_text():
+    bars = parse_fchart_minute_text(_FCHART_SAMPLE)
+    assert len(bars) == 3
+    assert bars[0]["hhmmss"] == "155600"
+    assert bars[0]["price"] == 329000
+    assert bars[-1]["hhmmss"] == "155800"
+    assert bars[-1]["price"] == 329000
 
 
 def test_fetch_all_ticks_for_day_no_network(monkeypatch):

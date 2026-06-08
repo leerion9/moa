@@ -47,6 +47,17 @@ def trading_days_in_year(year: int, holidays: FrozenSet[str]) -> List[str]:
     return out
 
 
+def in_date_range(ymd: str, *, from_ymd: str = "", to_ymd: str = "") -> bool:
+    text = str(ymd or "").strip()
+    start = str(from_ymd or "").strip()
+    end = str(to_ymd or "").strip()
+    if start and text < start:
+        return False
+    if end and text > end:
+        return False
+    return True
+
+
 def plan_tasks_for_year(
     cache_bars: Dict[str, List[Dict[str, object]]],
     year: int,
@@ -55,10 +66,14 @@ def plan_tasks_for_year(
     gap_min_pct: float,
     gap_max_pct: float,
     skip_keys: Set[str],
+    from_ymd: str = "",
+    to_ymd: str = "",
 ) -> List[BackfillTask]:
     """Scan history_cache daily bars; no HTTP."""
     tasks: List[BackfillTask] = []
     for ymd in trading_days_in_year(year, holidays):
+        if not in_date_range(ymd, from_ymd=from_ymd, to_ymd=to_ymd):
+            continue
         for symbol, bars in sorted(cache_bars.items()):
             if not bars:
                 continue

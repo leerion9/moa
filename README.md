@@ -59,8 +59,17 @@ moa/
 │   ├── universe_builder.py   # 유니버스 빌더 (1차/RS/2차 필터 파이프라인)
 │   ├── universe_cache.py     # 당일 유니버스 캐시
 │   ├── history_cache.py      # Naver 일봉 영구 캐시 (증분 갱신)
-│   ├── universe_xlsx.py      # universe.xlsx writer
+│   ├── universe_xlsx.py      # universe.xlsx writer (n+15일 가격 추적)
+│   ├── result_xlsx.py        # result.xlsx writer (n+15일 가격 추적)
+│   ├── xlsx_price_track.py   # n+1~n+15 고가 대비 % 갱신
 │   ├── open_positions.py     # 기존 보유 종목 조회 (매수 감시 제외)
+│   ├── kis_token_cache.py    # KIS 토큰 파일 캐시 (main/vi_collector 공유)
+│   ├── vi_collector_logic.py # VI 이벤트·분봉 판정 로직
+│   ├── vi_universe_xlsx.py   # vi_universe.xlsx writer
+│   ├── gap_collector_logic.py# 갭상승 회복 전략 시뮬 로직
+│   ├── gap_result_xlsx.py    # gap_result/gap_backfill xlsx writer
+│   ├── gap_naver_ticks.py    # 네이버 체결(sise_time) 크롤·분봉 변환
+│   ├── gap_backfill_queue.py # 과거 소급 후보 큐 관리
 │   ├── naver_universe.py     # 네이버 종목 스크래핑
 │   ├── naver_symbol_master.py
 │   ├── result_csv.py
@@ -68,17 +77,17 @@ moa/
 ├── scripts/
 │   ├── build_result.py
 │   ├── build_universe.py     # 유니버스 배치 빌드 CLI
+│   ├── vi_collector.py       # 장마감 VI 유니버스 수집
+│   ├── gap_collector.py      # 장마감 갭상승 회복 전략 일일 수집
+│   ├── gap_backfill.py       # 갭 전략 과거 소급 백필 (네이버 체결)
+│   ├── update_holidays.py
 │   └── update_symbol_master.py
 ├── data/
-│   └── logs/
-├── tests/
-│   ├── test_api_client.py    # 32개 테스트
-│   ├── test_universe_builder.py  # 38개 테스트
-│   ├── test_naver_universe.py
-│   ├── test_strategy.py
-│   ├── test_open_positions.py
-│   ├── test_result_fifo.py
-│   └── test_trading_day.py
+│   ├── history_cache/        # 일봉 영구 캐시 (git 제외)
+│   ├── gap_backfill/         # 소급 큐·체결 캐시 (git 제외)
+│   ├── kis_token_cache.json  # 토큰 공유 (git 제외)
+│   └── logs/{live|paper}/    # system.log, xlsx, csv
+├── tests/                    # 137개 테스트
 ├── .cursorrules
 ├── .env.example
 ├── main.py
@@ -102,11 +111,22 @@ IS_PAPER_TRADING=true
 SIM_MODE=true           # 현재: live API + 가상주문. 실매매 전환 시 false
 STRATEGY_MODE=1         # 1=최초돌파, 2=추세지속
 TRAILING_STOP_PCT=0.075
+W52_MAX_GAP_PCT=0.30    # 52주 신고가 대비 전일 종가 gap 30% 이상 낮으면 유니버스 제외
 RESULT_WRITE_HHMM=15:32 # 장 종료 후 result.xlsx 기록
 SHUTDOWN_HHMM=15:40     # 봇 종료
+# 갭상승 회복 전략 (gap_collector / gap_backfill)
+GAP_MIN_PCT=3.0
+GAP_MAX_PCT=9.0
+GAP_DIP_MIN_PCT=3.0
+GAP_TRAILING_STOP_PCT=0.05
+GAP_BUY_QTY=1
+GAP_BACKFILL_BATCH_SIZE=30
+GAP_NAVER_TICK_DELAY_SEC=0.15
 ```
 
 ## 실행
+
+### 52주 신고가 매매 (main.py)
 ```bash
 # 최초 1회 — 1차 필터 종목 history 풀 수집 (~1시간, 2026-05-26 완료: 1714종)
 python -m scripts.build_universe --bootstrap-history
@@ -116,6 +136,30 @@ python main.py
 
 # 수동 dual 유니버스만 빌드 (선택)
 python -m scripts.build_universe
+```
+
+### 장마감 후 별도 프로세스 (main.py와 분리)
+```bash
+# VI 유니버스 수집 → data/logs/{mode}/vi_universe.xlsx
+python -m scripts.vi_collector
+
+# 갭상승 회복 전략 일일 수집 → data/logs/{mode}/gap_result.xlsx
+python -m scripts.gap_collector
+```
+
+### 갭 전략 과거 소급 (gap_backfill)
+```bash
+# 1) history_cache 일봉으로 연도별 후보 큐 생성 (HTTP 없음)
+python -m scripts.gap_backfill plan --year 2025
+
+# 2) 처리 예정 확인 (크롤링 없음, dry-run)
+python -m scripts.gap_backfill run --year 2025 --limit 30
+
+# 3) 실제 네이버 체결 크롤링 + 시뮬 + gap_backfill.xlsx 기록
+python -m scripts.gap_backfill run --year 2025 --limit 30 --execute
+
+# 진행 상태
+python -m scripts.gap_backfill status --year 2025
 ```
 
 ## 테스트
@@ -208,6 +252,32 @@ python -m pytest -q
 - `result_csv.py` 내 `append_result1_rows` 함수(line 666~) 존재 확인 — import 정상
 
 **테스트 현황**: 총 **80개 통과** (api_client 13, universe_builder 39, strategy 8, trading_day 12, result_fifo 6, 기타 2)
+
+### ✅ Phase 5 — 완료 (커밋 `e6d8766` ~ `efca999`)
+
+#### 5-1. n+15일 가격 추적 ✅
+- `universe.xlsx` / `result.xlsx`에 n(기준가)과 n+1~n+15 고가 대비 % 컬럼 추가
+- 장 마감 후 `history_cache`로 일별 갱신 (`core/xlsx_price_track.py`)
+
+#### 5-2. VI 유니버스 배치 수집기 ✅
+- `scripts/vi_collector.py` — 정적 상승 VI 1차 이벤트를 KIS API·분봉으로 수집
+- 결과: `data/logs/{mode}/vi_universe.xlsx` (main.py와 별도 프로세스)
+- 2차상승vi 확정, 발동vs해제·거래대금·시총 컬럼 보강
+
+#### 5-3. KIS 토큰 파일 캐시 ✅
+- `data/kis_token_cache.json` — main.py 발급 토큰을 vi_collector가 재사용
+
+#### 5-4. 52주 유니버스 gap 필터 ✅
+- `W52_MAX_GAP_PCT=0.30` — 전일 종가가 52주 신고가 대비 30% 이상 낮은 종목 제외
+
+#### 5-5. 갭상승 회복 전략 (검증용, main과 별도) ✅
+- **전략**: 전일 대비 시가 +3~+9% 갭 → 시가 대비 -3% 하락 후 → 시가 회복 시 매수 → 트레일링 -5% 또는 종가 매도
+- **일일 수집**: `gap_collector` — KIS 분봉 기반 당일 시뮬 → `gap_result.xlsx`
+- **과거 소급**: `gap_backfill` — 네이버 `sise_time` 체결 크롤링 (`--execute` 시에만 HTTP) → `gap_backfill.xlsx`
+- 체결 캐시: `data/gap_backfill/ticks/`, 큐: `data/gap_backfill/queue_YYYY.json`
+- **xlsx 공통 컬럼 (29개)**: 시총/거래대금(KIS·일일만) + 당일거래량·거래대금(근사)·발행주식수(현재)·시총(근사)
+
+**테스트 현황**: 총 **137개 통과**
 
 ### 📋 Phase 4 — 실전 운영 이슈 정리 (2026-05-26 live 실행 분석)
 
@@ -329,10 +399,15 @@ python -m pytest -q
 
 ## 중요 메모
 - KIS 요청 제한을 피하기 위해 예수금 조회는 캐시를 사용합니다.
-- **history_cache**: bootstrap 1회 후 매일 page1 증분 (~12-17분). `data/history_cache/` (git 제외).
+- **history_cache**: bootstrap 1회 후 매일 page1 증분 (~12-17min). `data/history_cache/` (git 제외).
 - **dual 유니버스**: `universe_cache_YYYYMMDD_s1.json` / `_s2.json`, `universe.xlsx` append.
-- **운영 스케줄**: PC **08:20**, `main.py` **08:30**, 감시 **09:00~15:30**.
+- **운영 스케줄**:
+  - PC **08:20** 기동 → `main.py` **08:30** → 감시 **09:00~15:30**
+  - **15:32** result.xlsx → **15:35~** `vi_collector`, `gap_collector` → **15:40** 봇 종료
 - `IS_PAPER_TRADING`(API)과 `SIM_MODE`(주문 시뮬)는 **별개** 설정.
+- **KIS 토큰**: `data/kis_token_cache.json` (main/vi_collector 공유, git 제외).
 - `data/`는 git에 포함하지 않습니다 (로그·캐시·결과 파일).
 - `RESULT_WRITE_HHMM=15:32`, `SHUTDOWN_HHMM=15:40`.
 - **현재 운영**: `IS_PAPER_TRADING=false` + `SIM_MODE=true`. 실매매 전환 시 `SIM_MODE=false`.
+- **실매매 전환 전**: `main.py`의 `max_positions` 상한 복원 필요 (n+15 추적용 임시 해제).
+- **gap_backfill**: 기본은 dry-run. 실제 크롤링은 `--execute` 플래그 필요.

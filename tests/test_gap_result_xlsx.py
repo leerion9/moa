@@ -45,6 +45,10 @@ def test_append_gap_result_rows(tmp_path: Path):
             "market_cap_billion": 3651,
             "trading_value_won": 30_000_000_000,
             "trading_value_billion": 300,
+            "daily_volume": 1_234_567,
+            "approx_trading_value_billion": 187,
+            "shares_outstanding": 239_000_000,
+            "approx_market_cap_billion": 3648,
         }
     ]
     n = append_gap_result_rows(path, rows, include_market_fields=True)
@@ -58,6 +62,10 @@ def test_append_gap_result_rows(tmp_path: Path):
     assert ws.cell(2, 1).value == HEADERS[0]
     assert ws.cell(3, 6).value == 417010
     assert ws.cell(3, 21).value == 1
+    assert ws.cell(3, 26).value == 1_234_567
+    assert ws.cell(3, 27).value == 187
+    assert ws.cell(3, 28).value == 239_000_000
+    assert ws.cell(3, 29).value == 3648
     wb.close()
 
     rows2 = [
@@ -98,6 +106,10 @@ def test_append_without_market_fields(tmp_path: Path):
             "return_pct": 1.28,
             "tax": 100.0,
             "fee_total": 20.0,
+            "daily_volume": 500_000,
+            "approx_trading_value_billion": 350,
+            "shares_outstanding": 800_000_000,
+            "approx_market_cap_billion": 56000,
         }
     ]
     append_gap_result_rows(path, rows, include_market_fields=False)
@@ -105,4 +117,8 @@ def test_append_without_market_fields(tmp_path: Path):
     ws = wb["2025"]
     assert ws.cell(3, 23).value is None
     assert ws.cell(3, 24).value is None
+    assert ws.cell(3, 26).value == 500_000
+    assert ws.cell(3, 27).value == 350
+    assert ws.cell(3, 28).value == 800_000_000
+    assert ws.cell(3, 29).value == 56000
     wb.close()

@@ -27,8 +27,10 @@ from core.api_client import KISApiClient
 from core.gap_collector_logic import (
     GapCandidate,
     GapTradeResult,
+    bar_volume_for_ymd,
+    build_gap_result_row,
     calc_trade_amounts,
-    hhmmss_to_time,
+    latest_close_from_bars,
     scan_gap_candidates_from_cache,
     simulate_gap_trade,
 )
@@ -120,38 +122,22 @@ def _trade_to_row(
     *,
     name: str,
     market_cap_billion: int | None,
+    symbol_bars: List[Dict[str, object]],
 ) -> Dict[str, object]:
-    amounts = calc_trade_amounts(
-        trade.buy_price,
-        trade.sell_price,
-        trade.qty,
+    return build_gap_result_row(
+        cand,
+        trade,
+        buy_ymd=date_yyyymmdd,
+        name=name,
         fee_rate_buy=settings.fee_rate_buy,
         fee_rate_sell=settings.fee_rate_sell,
         tax_rate_sell=settings.tax_rate_sell,
+        market_cap_billion=market_cap_billion,
+        trading_value_won=trade.trading_value_won,
+        trading_value_billion=trading_value_to_billion_won(trade.trading_value_won),
+        daily_volume=bar_volume_for_ymd(symbol_bars, date_yyyymmdd),
+        current_price=latest_close_from_bars(symbol_bars),
     )
-    return {
-        "buy_ymd": date_yyyymmdd,
-        "sell_ymd": date_yyyymmdd,
-        "buy_time": hhmmss_to_time(trade.buy_hhmmss),
-        "sell_time": hhmmss_to_time(trade.sell_hhmmss),
-        "symbol": cand.symbol,
-        "name": name,
-        "gap_pct": cand.gap_pct,
-        "max_dip_pct": trade.max_dip_pct,
-        "buy_price": trade.buy_price,
-        "sell_price": trade.sell_price,
-        "qty": trade.qty,
-        "buy_amount": amounts["buy_amount"],
-        "sell_amount": amounts["sell_amount"],
-        "pnl": amounts["pnl"],
-        "return_pct": amounts["return_pct"],
-        "tax": amounts["tax"],
-        "fee_total": amounts["fee_total"],
-        "market_cap_billion": market_cap_billion,
-        "trading_value_won": trade.trading_value_won,
-        "trading_value_billion": trading_value_to_billion_won(trade.trading_value_won),
-        "sell_reason": trade.sell_reason,
-    }
 
 
 def _simulate_candidate(
@@ -255,6 +241,7 @@ def collect_gap_trades_for_date(
                 trade,
                 name=names.get(cand.symbol, ""),
                 market_cap_billion=caps.get(cand.symbol),
+                symbol_bars=cache_bars.get(cand.symbol, []),
             )
         )
         _log.info(

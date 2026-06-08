@@ -1,4 +1,4 @@
-"""Naver Finance tick (sise_time) fetch/parse and minute-bar conversion for gap backfill."""
+"""Naver Finance intraday fetch (fchart minute + sise_time ticks) for gap backfill."""
 
 from __future__ import annotations
 
@@ -16,6 +16,10 @@ from bs4 import BeautifulSoup
 _log = logging.getLogger("moa")
 
 _SISE_TIME_URL = "https://finance.naver.com/item/sise_time.naver"
+_FCHART_URL = "https://fchart.stock.naver.com/siseJson.nhn"
+_FCHART_ROW_RE = re.compile(
+    r'\["(\d{12})"\s*,\s*([^,\]]*)\s*,\s*([^,\]]*)\s*,\s*([^,\]]*)\s*,\s*([^,\]]*)\s*,\s*([^,\]]*)'
+)
 _UA = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -101,6 +105,121 @@ def fetch_sise_time_page(
     return parse_sise_time_html(resp.text)
 
 
+def _parse_fchart_value(raw: str) -> Optional[int]:
+    text = str(raw or "").strip()
+    if not text or text.lower() == "null":
+        return None
+    text = text.replace(",", "")
+    if text.lstrip("-").isdigit():
+        return int(text)
+    return None
+
+
+def datetime12_to_hhmmss(dt12: str) -> str:
+    text = str(dt12 or "").strip()
+    if len(text) < 12 or not text.isdigit():
+        return ""
+    return f"{text[8:10]}{text[10:12]}00"
+
+
+def parse_fchart_minute_text(text: str) -> List[Dict[str, object]]:
+    """
+    Parse Naver fchart minute JSON-like payload.
+    Returns oldest-first minute bars for simulate_gap_trade().
+    """
+    rows: List[tuple[str, int, int]] = []
+    for match in _FCHART_ROW_RE.finditer(text or ""):
+        dt12 = match.group(1)
+        close_px = _parse_fchart_value(match.group(5))
+        acml_vol = _parse_fchart_value(match.group(6))
+        if close_px is None or close_px <= 0:
+            continue
+        hhmmss = datetime12_to_hhmmss(dt12)
+        if not hhmmss:
+            continue
+        rows.append((hhmmss, close_px, acml_vol or 0))
+
+    if not rows:
+        return []
+
+    rows.sort(key=lambda r: r[0])
+    bars: List[Dict[str, object]] = []
+    prev_acml = 0
+    acml_value = 0
+    for hhmmss, close_px, acml_vol in rows:
+        vol_delta = max(acml_vol - prev_acml, 0) if acml_vol > 0 else 0
+        if acml_vol > 0:
+            prev_acml = acml_vol
+        acml_value += close_px * vol_delta
+        bars.append({
+            "hhmmss": hhmmss,
+            "price": close_px,
+            "open": close_px,
+            "high": close_px,
+            "low": close_px,
+            "volume": vol_delta,
+            "acml_tr_pbmn": acml_value,
+        })
+    return bars
+
+
+def fetch_fchart_minute_bars(
+    symbol: str,
+    ymd: str,
+    *,
+    delay_sec: float = 0.0,
+    session: Optional[requests.Session] = None,
+) -> List[Dict[str, object]]:
+    own = session is None
+    sess = session or requests.Session()
+    if own:
+        sess.headers.update(_UA)
+    params = {
+        "symbol": symbol,
+        "requestType": "1",
+        "startTime": str(ymd).strip(),
+        "endTime": str(ymd).strip(),
+        "timeframe": "minute",
+    }
+    resp = sess.get(_FCHART_URL, params=params, timeout=15)
+    resp.raise_for_status()
+    if delay_sec > 0:
+        time.sleep(delay_sec)
+    return parse_fchart_minute_text(resp.text)
+
+
+def fetch_intraday_minute_bars(
+    symbol: str,
+    ymd: str,
+    *,
+    delay_sec: float = 0.15,
+    session: Optional[requests.Session] = None,
+) -> List[Dict[str, object]]:
+    """
+    Fetch intraday minute bars for a past session.
+    Tries fchart minute first (recent retention), then sise_time ticks.
+    """
+    own = session is None
+    sess = session or requests.Session()
+    if own:
+        sess.headers.update(_UA)
+
+    try:
+        bars = fetch_fchart_minute_bars(
+            symbol,
+            ymd,
+            delay_sec=delay_sec,
+            session=sess,
+        )
+        if bars:
+            return bars
+    except Exception as exc:
+        _log.warning("fchart minute fail %s %s: %s", symbol, ymd, exc)
+
+    ticks = fetch_all_ticks_for_day(symbol, ymd, delay_sec=delay_sec, session=sess)
+    return ticks_to_minute_bars(ticks)
+
+
 def fetch_all_ticks_for_day(
     symbol: str,
     ymd: str,
@@ -177,6 +296,10 @@ def tick_cache_path(base_dir: Path, ymd: str, symbol: str) -> Path:
     return base_dir / ymd / f"{symbol}.json"
 
 
+def minute_cache_path(base_dir: Path, ymd: str, symbol: str) -> Path:
+    return base_dir / ymd / f"{symbol}_minute.json"
+
+
 def save_ticks_cache(path: Path, *, symbol: str, ymd: str, ticks: Sequence[NaverTick]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -188,6 +311,41 @@ def save_ticks_cache(path: Path, *, symbol: str, ymd: str, ticks: Sequence[Naver
         ],
     }
     path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+
+def save_minute_cache(
+    path: Path,
+    *,
+    symbol: str,
+    ymd: str,
+    bars: Sequence[Dict[str, object]],
+    source: str,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "symbol": symbol,
+        "ymd": ymd,
+        "source": source,
+        "bars": list(bars),
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+
+def load_minute_cache(path: Path) -> List[Dict[str, object]]:
+    if not path.is_file():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    raw = data.get("bars", [])
+    if not isinstance(raw, list):
+        return []
+    out: List[Dict[str, object]] = []
+    for row in raw:
+        if isinstance(row, dict) and row.get("hhmmss"):
+            out.append(dict(row))
+    return out
 
 
 def load_ticks_cache(path: Path) -> List[NaverTick]:

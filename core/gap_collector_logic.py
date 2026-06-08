@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from datetime import date, time
 from typing import Dict, List, Optional, Sequence
 
+from core.vi_collector_logic import trading_value_to_billion_won
+
 MARKET_CLOSE_HHMMSS = "153000"
 
 
@@ -251,6 +253,61 @@ def ymd_to_date(ymd: str) -> date:
     return date(int(text[:4]), int(text[4:6]), int(text[6:8]))
 
 
+def bar_for_ymd(bars: Sequence[Dict[str, object]], ymd: str) -> Optional[Dict[str, object]]:
+    dot = ymd_to_dot(ymd)
+    if not dot:
+        return None
+    for bar in bars:
+        if str(bar.get("date", "") or "").strip() == dot:
+            return bar
+    return None
+
+
+def bar_volume_for_ymd(bars: Sequence[Dict[str, object]], ymd: str) -> int:
+    bar = bar_for_ymd(bars, ymd)
+    if not bar:
+        return 0
+    return _safe_int(bar.get("volume"))
+
+
+def latest_close_from_bars(bars: Sequence[Dict[str, object]]) -> int:
+    """history_cache bars are newest-first."""
+    if not bars:
+        return 0
+    return _safe_int(bars[0].get("close"))
+
+
+def calc_volume_approx_fields(
+    open_px: int,
+    daily_volume: int,
+    *,
+    market_cap_billion: int | None = None,
+    current_price: int | None = None,
+) -> Dict[str, object]:
+    """
+    Approximate volume/cap fields for gap result xlsx.
+    shares_outstanding uses current market cap and current price.
+    """
+    approx_tv_won = open_px * daily_volume if open_px > 0 and daily_volume > 0 else 0
+    shares: int | None = None
+    price_for_shares = current_price if current_price and current_price > 0 else 0
+    if market_cap_billion and market_cap_billion > 0 and price_for_shares > 0:
+        cap_won = int(market_cap_billion) * 100_000_000
+        shares = int(cap_won / price_for_shares)
+    approx_cap_billion: int | None = None
+    if shares and shares > 0 and open_px > 0:
+        approx_cap_billion = int(shares * open_px / 100_000_000)
+    return {
+        "daily_volume": daily_volume if daily_volume > 0 else None,
+        "approx_trading_value_won": approx_tv_won if approx_tv_won > 0 else None,
+        "approx_trading_value_billion": (
+            trading_value_to_billion_won(approx_tv_won) if approx_tv_won > 0 else None
+        ),
+        "shares_outstanding": shares,
+        "approx_market_cap_billion": approx_cap_billion,
+    }
+
+
 def build_gap_result_row(
     cand: GapCandidate,
     trade: GapTradeResult,
@@ -263,6 +320,8 @@ def build_gap_result_row(
     market_cap_billion: int | None = None,
     trading_value_won: int = 0,
     trading_value_billion: int | None = None,
+    daily_volume: int | None = None,
+    current_price: int | None = None,
 ) -> Dict[str, object]:
     amounts = calc_trade_amounts(
         trade.buy_price,
@@ -298,6 +357,15 @@ def build_gap_result_row(
         row["trading_value_won"] = trading_value_won
     if trading_value_billion is not None:
         row["trading_value_billion"] = trading_value_billion
+    vol_fields = calc_volume_approx_fields(
+        cand.open_price,
+        daily_volume or 0,
+        market_cap_billion=market_cap_billion,
+        current_price=current_price,
+    )
+    for key, val in vol_fields.items():
+        if val is not None:
+            row[key] = val
     return row
 
 
