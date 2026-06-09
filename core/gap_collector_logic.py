@@ -6,9 +6,8 @@ from dataclasses import dataclass
 from datetime import date, time
 from typing import Dict, List, Optional, Sequence
 
+from core.gap_naver_ticks import MARKET_CLOSE_HHMMSS, MARKET_OPEN_HHMMSS, in_regular_session
 from core.vi_collector_logic import trading_value_to_billion_won
-
-MARKET_CLOSE_HHMMSS = "153000"
 
 
 @dataclass(frozen=True)
@@ -160,12 +159,21 @@ def simulate_gap_trade(
 
     sorted_bars = sorted(minute_bars, key=lambda b: str(b.get("hhmmss", "") or ""))
 
+    def _session_bar(bar: Dict[str, object]) -> bool:
+        return in_regular_session(
+            str(bar.get("hhmmss", "") or ""),
+            open_hhmmss=MARKET_OPEN_HHMMSS,
+            close_hhmmss=MARKET_CLOSE_HHMMSS,
+        )
+
     dipped = False
     max_dip_before_buy = 0.0
     buy_hhmmss = ""
     buy_idx = -1
 
     for idx, bar in enumerate(sorted_bars):
+        if not _session_bar(bar):
+            continue
         low = _bar_low(bar)
         high = _bar_high(bar)
         if low <= 0 or high <= 0:
@@ -190,6 +198,8 @@ def simulate_gap_trade(
     sell_reason = "close"
 
     for bar in sorted_bars[buy_idx:]:
+        if not _session_bar(bar):
+            continue
         hhmmss = str(bar.get("hhmmss", "") or "").strip()
         if not hhmmss:
             continue
@@ -208,18 +218,19 @@ def simulate_gap_trade(
             break
 
     if not sell_hhmmss:
-        last = sorted_bars[-1]
-        sell_hhmmss = str(last.get("hhmmss", "") or MARKET_CLOSE_HHMMSS).strip()
         if close_price > 0:
             sell_price = close_price
         else:
+            last = sorted_bars[-1]
             sell_price = _safe_int(last.get("price"))
+        sell_hhmmss = MARKET_CLOSE_HHMMSS
         sell_reason = "close"
 
     if sell_price <= 0:
         return None
 
-    tv_won = max(_safe_int(b.get("acml_tr_pbmn")) for b in sorted_bars)
+    session_bars = [b for b in sorted_bars if _session_bar(b)]
+    tv_won = max((_safe_int(b.get("acml_tr_pbmn")) for b in session_bars), default=0)
 
     return GapTradeResult(
         symbol="",

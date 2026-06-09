@@ -84,6 +84,45 @@ def test_simulate_gap_trade_close_exit():
     )
     assert trade is not None
     assert trade.sell_reason == "close"
+    assert trade.sell_hhmmss == "153000"
+    assert trade.sell_price == 10100
+
+
+def test_simulate_excludes_premarket_and_after_hours():
+    """Only 09:00-15:30 bars count; pre-market dip must not trigger buy."""
+    open_px = 10000
+    bars = [
+        {"hhmmss": "083000", "price": 9600, "high": 9600, "low": 9600, "acml_tr_pbmn": 10},
+        {"hhmmss": "090000", "price": 10000, "high": 10000, "low": 10000, "acml_tr_pbmn": 20},
+        {"hhmmss": "153000", "price": 10100, "high": 10100, "low": 10100, "acml_tr_pbmn": 30},
+        {"hhmmss": "155800", "price": 9900, "high": 9900, "low": 9900, "acml_tr_pbmn": 40},
+    ]
+    assert simulate_gap_trade(
+        open_px,
+        bars,
+        dip_min_pct=3.0,
+        trailing_stop_pct=0.05,
+        close_price=10100,
+    ) is None
+
+    bars_with_session_dip = [
+        {"hhmmss": "083000", "price": 9600, "high": 9600, "low": 9600, "acml_tr_pbmn": 10},
+        {"hhmmss": "090100", "price": 9600, "high": 9600, "low": 9600, "acml_tr_pbmn": 15},
+        {"hhmmss": "100000", "price": 10000, "high": 10000, "low": 9950, "acml_tr_pbmn": 20},
+        {"hhmmss": "153000", "price": 10100, "high": 10100, "low": 10100, "acml_tr_pbmn": 30},
+        {"hhmmss": "155800", "price": 9900, "high": 9900, "low": 9900, "acml_tr_pbmn": 40},
+    ]
+    trade = simulate_gap_trade(
+        open_px,
+        bars_with_session_dip,
+        dip_min_pct=3.0,
+        trailing_stop_pct=0.05,
+        close_price=10100,
+    )
+    assert trade is not None
+    assert trade.buy_hhmmss == "100000"
+    assert trade.sell_hhmmss == "153000"
+    assert trade.sell_reason == "close"
     assert trade.sell_price == 10100
 
 

@@ -5,6 +5,8 @@ from __future__ import annotations
 from core.gap_naver_ticks import (
     datetime12_to_hhmmss,
     fetch_all_ticks_for_day,
+    filter_regular_session_bars,
+    in_regular_session,
     parse_fchart_minute_text,
     parse_sise_time_html,
     thistime_for_ymd,
@@ -14,9 +16,11 @@ from core.gap_naver_ticks import (
 
 _FCHART_SAMPLE = """
 [['날짜', '시가', '고가', '저가', '종가', '거래량', '외국인소진율'],
-["202606051558", null, null, null, 329000, 31299144, null],
-["202606051557", null, null, null, 329500, 31299108, null],
-["202606051556", null, null, null, 329000, 31298457, null],
+["202606051528", null, null, null, 329000, 31299144, null],
+["202606051529", null, null, null, 329500, 31299108, null],
+["202606051530", null, null, null, 329000, 31298457, null],
+["202606051558", null, null, null, 328000, 31299000, null],
+["202606050838", null, null, null, 327000, 1000, null],
 ]
 """
 
@@ -78,11 +82,25 @@ def test_datetime12_to_hhmmss():
 
 def test_parse_fchart_minute_text():
     bars = parse_fchart_minute_text(_FCHART_SAMPLE)
-    assert len(bars) == 3
-    assert bars[0]["hhmmss"] == "155600"
-    assert bars[0]["price"] == 329000
+    assert len(bars) == 5
+    assert bars[0]["hhmmss"] == "083800"
+    assert bars[3]["hhmmss"] == "153000"
     assert bars[-1]["hhmmss"] == "155800"
-    assert bars[-1]["price"] == 329000
+
+
+def test_filter_regular_session_bars():
+    assert in_regular_session("090000")
+    assert in_regular_session("153000")
+    assert not in_regular_session("083800")
+    assert not in_regular_session("155800")
+    raw = [
+        {"hhmmss": "083800", "price": 1},
+        {"hhmmss": "090000", "price": 2},
+        {"hhmmss": "153000", "price": 3},
+        {"hhmmss": "155800", "price": 4},
+    ]
+    filtered = filter_regular_session_bars(raw)
+    assert [b["hhmmss"] for b in filtered] == ["090000", "153000"]
 
 
 def test_fetch_all_ticks_for_day_no_network(monkeypatch):

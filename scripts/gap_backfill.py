@@ -49,6 +49,7 @@ from core.gap_collector_logic import (
 from core.naver_universe import fetch_market_cap_list
 from core.gap_naver_ticks import (
     fetch_intraday_minute_bars,
+    filter_regular_session_bars,
     load_minute_cache,
     load_ticks_cache,
     minute_cache_path,
@@ -200,7 +201,7 @@ def _process_task(
     caps: Dict[str, int],
     cache_bars: Dict[str, List[Dict[str, object]]],
 ) -> Dict[str, object] | None:
-    minute_bars = _resolve_minute_bars(task, execute=execute)
+    minute_bars = filter_regular_session_bars(_resolve_minute_bars(task, execute=execute))
     if not minute_bars:
         if execute:
             _log.warning("  분봉 데이터 없음 %s %s", task.symbol, task.ymd)

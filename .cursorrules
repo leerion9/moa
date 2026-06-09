@@ -63,10 +63,27 @@
 
 ## Phase 5 추가 (README 참고)
 - **VI 수집**: `scripts/vi_collector` → `vi_universe.xlsx` (장마감 후, main 별도)
-- **갭상승 회복 전략**: `gap_collector`(일일/KIS분봉) + `gap_backfill`(과거/네이버체결, `--execute`시만 크롤링)
+- **갭상승 회복 전략**: `gap_collector`(일일/KIS분봉) + `gap_backfill`(과거/네이버 fchart, `--execute`시만 크롤링)
 - **KIS 토큰 캐시**: `data/kis_token_cache.json` (main/vi_collector 공유)
 - **n+15 가격 추적**: universe/result xlsx
 - **W52 gap 필터**: `W52_MAX_GAP_PCT=0.30`
+
+## Phase 6 — 갭 전략 (2026-06-09, README 상세)
+
+### 갭 전략 규칙
+- 전일 대비 시가 +3~+9% → 시가 대비 -3% dip → 시가 회복 시 매수 → 트레일링 -5% 또는 **15:30 종가** 매도
+- **일일 기준**: `gap_collector` + KIS 분봉 → `gap_result.xlsx`
+- **과거 소급**: `gap_backfill` + Naver fchart → `gap_backfill.xlsx` (KIS와 수익률 1:1 비교 **불가**)
+
+### 09:00~15:30 시뮬 규칙 (중요)
+- **정규장만** dip·매수·트레일링 (Naver fchart 장전~08:xx·장후~15:57 제외)
+- 종가 매도: `sell_hhmmss=153000`, 가격=일봉 종가
+- xlsx 재빌드: `python -m scripts.rebuild_gap_backfill_xlsx --year 2026 --from 20260529 --to 20260609`
+
+### 데이터 한계
+- Naver fchart: **최근 ~5~7거래일**만. 1주+ 과거 무료 소급 불가
+- KIS: **당일** 분봉만 → 매일 gap_collector로 축적 필요
+- gap_backfill.xlsx 2026: 165건 (5/29~6/9, 6/3 휴장·캐시 없음)
 
 ## 현재 알려진 이슈 (README Phase 4 참고)
 1. ~~유니버스 빌드 ~64분~~ → **history_cache 증분** ✅
@@ -76,3 +93,5 @@
 5. ~~vol_ma20=0~~ → **MIN_VOL_MA20=1** ✅
 6. ~~보유 종목 다음날 매수 감시 제외~~ → **open_positions** ✅
 7. **max_positions 임시 해제** — n+15 추적용. 실매매 전환 전 복원 필요
+8. **gap_collector** — 15:40 정상 동작 확인 중, 며칠 더 모니터링
+9. **Naver vs KIS 갭 수익률** — 백필은 참고용만, 일일 KIS가 기준

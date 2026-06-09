@@ -29,6 +29,9 @@ _UA = {
 }
 _TIME_RE = re.compile(r"^\d{1,2}:\d{2}:\d{2}$")
 _MAX_PAGES = 200
+# KRX regular session (same as KIS minute chart)
+MARKET_OPEN_HHMMSS = "090000"
+MARKET_CLOSE_HHMMSS = "153000"
 
 
 @dataclass(frozen=True)
@@ -113,6 +116,49 @@ def _parse_fchart_value(raw: str) -> Optional[int]:
     if text.lstrip("-").isdigit():
         return int(text)
     return None
+
+
+def normalize_hhmmss(raw: object) -> str:
+    text = "".join(ch for ch in str(raw or "") if ch.isdigit())
+    if len(text) >= 6:
+        return text[:6]
+    if len(text) == 4:
+        return text + "00"
+    if len(text) == 5:
+        return text + "0"
+    return ""
+
+
+def in_regular_session(
+    hhmmss: str,
+    *,
+    open_hhmmss: str = MARKET_OPEN_HHMMSS,
+    close_hhmmss: str = MARKET_CLOSE_HHMMSS,
+) -> bool:
+    key = normalize_hhmmss(hhmmss)
+    if not key:
+        return False
+    return open_hhmmss <= key <= close_hhmmss
+
+
+def filter_regular_session_bars(
+    bars: Sequence[Dict[str, object]],
+    *,
+    open_hhmmss: str = MARKET_OPEN_HHMMSS,
+    close_hhmmss: str = MARKET_CLOSE_HHMMSS,
+) -> List[Dict[str, object]]:
+    """Drop pre/post-market minutes (Naver fchart may include ~08:30 and ~15:57)."""
+    out: List[Dict[str, object]] = []
+    for bar in bars:
+        if not isinstance(bar, dict):
+            continue
+        if in_regular_session(
+            str(bar.get("hhmmss", "") or ""),
+            open_hhmmss=open_hhmmss,
+            close_hhmmss=close_hhmmss,
+        ):
+            out.append(dict(bar))
+    return out
 
 
 def datetime12_to_hhmmss(dt12: str) -> str:
