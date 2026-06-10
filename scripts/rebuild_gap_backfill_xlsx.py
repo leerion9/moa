@@ -15,10 +15,12 @@ from typing import Dict, List, Set, Tuple
 
 from config.settings import settings
 from core.gap_backfill_queue import BackfillTask, load_queue, task_key
+from core.gap_collector_logic import find_gap_candidate
 from core.gap_naver_ticks import minute_cache_path
 from core.gap_result_xlsx import append_gap_result_rows
 from core.naver_symbol_master import load_or_refresh_symbol_master
 from core.naver_universe import fetch_market_cap_list
+from core.trading_day import load_manual_holiday_set
 from scripts.gap_backfill import _load_cache_bars, _process_task
 
 logging.basicConfig(
@@ -53,6 +55,33 @@ def _parse_ymd(value: str) -> str:
     return text
 
 
+def _task_from_cache(
+    sym: str,
+    ymd: str,
+    cache_bars: Dict[str, List[Dict[str, object]]],
+) -> BackfillTask | None:
+    bars = cache_bars.get(sym)
+    if not bars:
+        return None
+    tagged = [{**b, "symbol": sym} for b in bars]
+    cand = find_gap_candidate(
+        tagged,
+        ymd,
+        gap_min_pct=settings.gap_min_pct,
+        gap_max_pct=settings.gap_max_pct,
+    )
+    if cand is None:
+        return None
+    return BackfillTask(
+        symbol=sym,
+        ymd=ymd,
+        open_price=cand.open_price,
+        prev_close=cand.prev_close,
+        gap_pct=cand.gap_pct,
+        close_price=cand.close_price,
+    )
+
+
 def rebuild(
     *,
     xlsx_path: Path,
@@ -69,28 +98,36 @@ def rebuild(
     from_ymd = _parse_ymd(from_ymd)
     to_ymd = _parse_ymd(to_ymd)
 
+    filtered_pairs = [
+        (ymd, sym)
+        for ymd, sym in pairs
+        if (not from_ymd or ymd >= from_ymd) and (not to_ymd or ymd <= to_ymd)
+    ]
+    symbols = sorted({sym for _, sym in filtered_pairs})
+    cache_bars = _load_cache_bars(settings.history_cache_dir, symbols)
     tasks_by_key = _task_map(year)
     missing = 0
+    cache_fallback = 0
     work: List[BackfillTask] = []
-    for ymd, sym in pairs:
-        if from_ymd and ymd < from_ymd:
-            continue
-        if to_ymd and ymd > to_ymd:
+    for ymd, sym in filtered_pairs:
+        if not minute_cache_path(settings.gap_backfill_ticks_dir, ymd, sym).is_file():
             continue
         key = task_key(sym, ymd)
         task = tasks_by_key.get(key)
         if task is None:
-            missing += 1
-            continue
-        if not minute_cache_path(settings.gap_backfill_ticks_dir, ymd, sym).is_file():
-            continue
+            task = _task_from_cache(sym, ymd, cache_bars)
+            if task is None:
+                missing += 1
+                continue
+            cache_fallback += 1
         work.append(task)
 
     dates = sorted({t.ymd for t in work})
     _log.info(
-        "rebuild 대상: %d건 (%d dates), queue 미매칭 %d건",
+        "rebuild 대상: %d건 (%d dates), cache fallback %d건, skip %d건",
         len(work),
         len(dates),
+        cache_fallback,
         missing,
     )
     _log.info("dates: %s", ", ".join(dates))
@@ -121,7 +158,9 @@ def rebuild(
             names[sym] = cap_name
 
     symbols = sorted({t.symbol for t in work})
-    cache_bars = _load_cache_bars(settings.history_cache_dir, symbols)
+    if not cache_bars:
+        cache_bars = _load_cache_bars(settings.history_cache_dir, symbols)
+    holidays = load_manual_holiday_set(settings.holiday_dates_path)
 
     total_rows = 0
     batch: List[Dict[str, object]] = []
@@ -132,6 +171,7 @@ def rebuild(
             names=names,
             caps=caps,
             cache_bars=cache_bars,
+            holidays=holidays,
         )
         if row is not None:
             batch.append(row)

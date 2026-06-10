@@ -22,7 +22,7 @@ import argparse
 import logging
 import sys
 from pathlib import Path
-from typing import Dict, List, Set
+from typing import Dict, FrozenSet, List, Set
 
 from config.settings import settings
 from core.gap_backfill_queue import (
@@ -200,6 +200,7 @@ def _process_task(
     names: Dict[str, str],
     caps: Dict[str, int],
     cache_bars: Dict[str, List[Dict[str, object]]],
+    holidays: FrozenSet[str],
 ) -> Dict[str, object] | None:
     minute_bars = filter_regular_session_bars(_resolve_minute_bars(task, execute=execute))
     if not minute_bars:
@@ -239,6 +240,8 @@ def _process_task(
         daily_volume=bar_volume_for_ymd(symbol_bars, task.ymd),
         current_price=latest_close_from_bars(symbol_bars),
         market_cap_billion=caps.get(task.symbol),
+        symbol_bars=symbol_bars,
+        holidays=holidays,
     )
 
 
@@ -279,6 +282,7 @@ def cmd_run(
 
     caps: Dict[str, int] = {}
     cache_bars: Dict[str, List[Dict[str, object]]] = {}
+    holidays = load_manual_holiday_set(settings.holiday_dates_path)
     if execute:
         cap_list, cap_names = fetch_market_cap_list(delay_sec=settings.naver_http_delay_sec)
         caps = {sym: cap for sym, cap in cap_list}
@@ -298,6 +302,7 @@ def cmd_run(
                 names=names,
                 caps=caps,
                 cache_bars=cache_bars,
+                holidays=holidays,
             )
         except Exception as exc:
             _log.error("  실패 %s: %s", task.key, exc)

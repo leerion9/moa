@@ -163,8 +163,27 @@ python -m scripts.gap_backfill run --year 2025 --limit 30 --execute
 python -m scripts.gap_backfill status --year 2025
 
 # 분봉 캐시만으로 xlsx 재생성 (HTTP 없음, 15:30 규칙 반영 후)
-python -m scripts.rebuild_gap_backfill_xlsx --year 2026
+python -m scripts.rebuild_gap_backfill_xlsx --year 2026 --from 20260529 --to 20260609
 ```
+
+### gap_backfill 분봉 보관 (2026-05-29~)
+
+**정책**: 사용자가 중단 요청할 때까지 **갭 후보 종목의 분봉을 모두 로컬에 영구 보관**한다.  
+`gap_backfill run --execute` 시 네이버 fchart 분봉을 크롤링하면 자동 저장된다.
+
+| 항목 | 경로 |
+|------|------|
+| **분봉 캐시** | `data/gap_backfill/ticks/{YYYYMMDD}/{종목코드}_minute.json` |
+| 백필 큐 | `data/gap_backfill/queue_{YYYY}.json` |
+| 진행 상태 | `data/gap_backfill/state.json` |
+| 시뮬 결과 | `data/logs/{live\|paper}/gap_backfill.xlsx` |
+
+- git **미포함** (`.gitignore`: `data/gap_backfill/`). PC 백업은 `ticks/` 폴더를 별도 복사.
+- xlsx만으로는 분봉 원본 복구 불가 → **ticks 보관 필수**.
+- 시뮬 규칙: **09:00~15:30 정규장**만 사용. 종가 매도 = **15:30 시각** + **일봉 정규장 종가**(장후 가격 아님).
+- xlsx **종가매도여부**: 트레일링=0, 15:30 종가 매도=1
+- xlsx **종가매도수익률**: 행별 가정 수익률 (매수가→당일 종가 매도). 종가매도여부=1이면 수익률과 동일
+- xlsx **익일시가매도수익률**: 행별 가정 수익률 (매수가→익거래일 시가 매도)
 
 ## 테스트
 ```bash
@@ -279,9 +298,9 @@ python -m pytest -q
 - **일일 수집**: `gap_collector` — KIS 분봉 기반 당일 시뮬 → `gap_result.xlsx`
 - **과거 소급**: `gap_backfill` — 네이버 **fchart 분봉** (`--execute` 시 HTTP) → `gap_backfill.xlsx` (폴백: `sise_time`)
 - 체결·분봉 캐시: `data/gap_backfill/ticks/{YYYYMMDD}/{종목}_minute.json`, 큐: `queue_YYYY.json`
-- **xlsx 공통 컬럼 (29개)**: 시총/거래대금(KIS·일일만) + 당일거래량·거래대금(근사)·발행주식수(현재)·시총(근사)
+- **xlsx 공통 컬럼 (32개)**: … + **종가매도수익률**·**익일시가매도수익률**·**종가매도여부**
 
-**테스트 현황**: 총 **141개 통과**
+**테스트 현황**: 총 **142개 통과**
 
 ### 📋 Phase 6 — 갭 전략 운영·백필 (2026-06-09)
 

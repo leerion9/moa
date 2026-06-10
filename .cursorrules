@@ -80,6 +80,13 @@
 - 종가 매도: `sell_hhmmss=153000`, 가격=일봉 종가
 - xlsx 재빌드: `python -m scripts.rebuild_gap_backfill_xlsx --year 2026 --from 20260529 --to 20260609`
 
+### gap_backfill 분봉 보관 (2026-05-29~, 중단 요청 전까지)
+- **분봉**: `data/gap_backfill/ticks/{YYYYMMDD}/{종목}_minute.json` (`--execute` 시 자동 저장)
+- **git 제외** — PC 백업: `ticks/` 폴더 별도 복사
+- **종가 매도**: 15:30 시각 + 일봉 정규장 종가 (장후 fchart 봉 미사용)
+- **xlsx 종가매도여부**: 0=트레일링, 1=종가
+- **xlsx 종가매도수익률/익일시가매도수익률**: 행별 가정 수익률 (당일종가·익일시가 매도)
+
 ### 데이터 한계
 - Naver fchart: **최근 ~5~7거래일**만. 1주+ 과거 무료 소급 불가
 - KIS: **당일** 분봉만 → 매일 gap_collector로 축적 필요

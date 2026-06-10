@@ -37,7 +37,7 @@ from core.gap_collector_logic import (
 from core.gap_result_xlsx import append_gap_result_rows, read_existing_buy_dates
 from core.history_cache import HistoryCacheStore, load_symbol_bars
 from core.naver_universe import _MARKET_SUM_URL, _MAX_PAGES_PER_MARKET, _parse_market_sum_page
-from core.trading_day import should_run_bot_today_kst
+from core.trading_day import load_manual_holiday_set, should_run_bot_today_kst
 from core.vi_collector_logic import trading_value_to_billion_won
 
 KST = ZoneInfo("Asia/Seoul")
@@ -137,6 +137,8 @@ def _trade_to_row(
         trading_value_billion=trading_value_to_billion_won(trade.trading_value_won),
         daily_volume=bar_volume_for_ymd(symbol_bars, date_yyyymmdd),
         current_price=latest_close_from_bars(symbol_bars),
+        symbol_bars=symbol_bars,
+        holidays=load_manual_holiday_set(settings.holiday_dates_path),
     )
 
 

@@ -35,6 +35,9 @@ HEADERS = [
     "누적손익",
     "성공여부",
     "평균수익률",
+    "종가매도수익률",
+    "익일시가매도수익률",
+    "종가매도여부",
     "시총",
     "거래대금",
     "시총대비거래대금비",
@@ -51,13 +54,15 @@ _ROW1_HINTS: Dict[int, str] = {
     9: "%",
     17: "%",
     22: "%",
-    23: "억원",
-    24: "억원",
-    25: "%",
-    26: "주",
+    23: "%",
+    24: "%",
+    26: "억원",
     27: "억원",
-    28: "주",
-    29: "억원",
+    28: "%",
+    29: "주",
+    30: "억원",
+    31: "주",
+    32: "억원",
 }
 
 
@@ -202,6 +207,40 @@ def read_existing_buy_dates(path: Path) -> Set[str]:
         return set()
 
 
+def read_last_avg_return(path: Path) -> tuple[int, float]:
+    """Returns (trade_count, running_avg_return_pct) from the last data row."""
+    count = read_max_no(path)
+    if count <= 0 or not path.exists():
+        return 0, 0.0
+    try:
+        wb = openpyxl.load_workbook(path, data_only=True)
+        best_no = -1
+        avg_ret = 0.0
+        for sn in wb.sheetnames:
+            sheet = wb[sn]
+            for row_idx in range(3, sheet.max_row + 1):
+                no_val = sheet.cell(row_idx, _COL["번호"]).value
+                if no_val is None:
+                    continue
+                try:
+                    no = int(no_val)
+                except Exception:
+                    continue
+                if no > best_no:
+                    best_no = no
+                    avg_ret = float(sheet.cell(row_idx, _COL["평균수익률"]).value or 0)
+        return count, avg_ret
+    except Exception:
+        return 0, 0.0
+
+
+def _running_avg(prev_avg: float, prev_count: int, value: float) -> float:
+    if prev_count <= 0:
+        return round(value, 2)
+    total = prev_avg * prev_count + value
+    return round(total / (prev_count + 1), 2)
+
+
 def append_gap_result_rows(
     path: Path,
     rows: List[Dict[str, Any]],
@@ -216,6 +255,7 @@ def append_gap_result_rows(
 
     max_no = read_max_no(path)
     cum_pnl = read_last_cumulative_pnl(path)
+    prev_count, prev_avg_ret = read_last_avg_return(path)
 
     wb = openpyxl.load_workbook(path)
     ws = wb[year]
@@ -260,7 +300,28 @@ def append_gap_result_rows(
         ws.cell(row_num, _COL["수수료"]).value = r.get("fee_total")
         ws.cell(row_num, _COL["누적손익"]).value = cum_pnl
         ws.cell(row_num, _COL["성공여부"]).value = success
-        write_pct_cell(ws.cell(row_num, _COL["평균수익률"]), ret_pct)
+
+        ret_val = float(ret_pct or 0)
+        prev_count += 1
+        avg_ret = _running_avg(prev_avg_ret, prev_count - 1, ret_val)
+        prev_avg_ret = avg_ret
+        write_pct_cell(ws.cell(row_num, _COL["평균수익률"]), avg_ret)
+
+        close_only = float(r.get("close_only_return_pct", ret_val) or ret_val)
+        write_pct_cell(ws.cell(row_num, _COL["종가매도수익률"]), close_only)
+
+        next_open_pct = r.get("next_open_return_pct")
+        if next_open_pct is not None:
+            write_pct_cell(
+                ws.cell(row_num, _COL["익일시가매도수익률"]),
+                float(next_open_pct),
+            )
+
+        close_sell = r.get("close_sell")
+        if close_sell is None:
+            reason = str(r.get("sell_reason", "") or "").strip().lower()
+            close_sell = 1 if reason == "close" else 0
+        ws.cell(row_num, _COL["종가매도여부"]).value = int(close_sell)
 
         if include_market_fields:
             cap = r.get("market_cap_billion")

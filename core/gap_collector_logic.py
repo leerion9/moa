@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, time
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, FrozenSet, List, Optional, Sequence
 
 from core.gap_naver_ticks import MARKET_CLOSE_HHMMSS, MARKET_OPEN_HHMMSS, in_regular_session
 from core.vi_collector_logic import trading_value_to_billion_won
@@ -281,6 +281,13 @@ def bar_volume_for_ymd(bars: Sequence[Dict[str, object]], ymd: str) -> int:
     return _safe_int(bar.get("volume"))
 
 
+def bar_open_for_ymd(bars: Sequence[Dict[str, object]], ymd: str) -> int:
+    bar = bar_for_ymd(bars, ymd)
+    if not bar:
+        return 0
+    return _safe_int(bar.get("open"))
+
+
 def latest_close_from_bars(bars: Sequence[Dict[str, object]]) -> int:
     """history_cache bars are newest-first."""
     if not bars:
@@ -333,6 +340,8 @@ def build_gap_result_row(
     trading_value_billion: int | None = None,
     daily_volume: int | None = None,
     current_price: int | None = None,
+    symbol_bars: Sequence[Dict[str, object]] | None = None,
+    holidays: FrozenSet[str] | None = None,
 ) -> Dict[str, object]:
     amounts = calc_trade_amounts(
         trade.buy_price,
@@ -342,6 +351,31 @@ def build_gap_result_row(
         fee_rate_sell=fee_rate_sell,
         tax_rate_sell=tax_rate_sell,
     )
+    close_amounts = calc_trade_amounts(
+        trade.buy_price,
+        cand.close_price,
+        trade.qty,
+        fee_rate_buy=fee_rate_buy,
+        fee_rate_sell=fee_rate_sell,
+        tax_rate_sell=tax_rate_sell,
+    )
+    next_open_return_pct: float | None = None
+    if symbol_bars and holidays is not None:
+        from core.xlsx_price_track import next_trading_day
+
+        next_ymd = next_trading_day(buy_ymd, holidays)
+        next_open = bar_open_for_ymd(symbol_bars, next_ymd)
+        if next_open > 0:
+            next_amounts = calc_trade_amounts(
+                trade.buy_price,
+                next_open,
+                trade.qty,
+                fee_rate_buy=fee_rate_buy,
+                fee_rate_sell=fee_rate_sell,
+                tax_rate_sell=tax_rate_sell,
+            )
+            next_open_return_pct = float(next_amounts["return_pct"])
+
     row: Dict[str, object] = {
         "buy_ymd": buy_ymd,
         "sell_ymd": buy_ymd,
@@ -361,6 +395,9 @@ def build_gap_result_row(
         "tax": amounts["tax"],
         "fee_total": amounts["fee_total"],
         "sell_reason": trade.sell_reason,
+        "close_sell": 1 if trade.sell_reason == "close" else 0,
+        "close_only_return_pct": close_amounts["return_pct"],
+        "next_open_return_pct": next_open_return_pct,
     }
     if market_cap_billion is not None:
         row["market_cap_billion"] = market_cap_billion
