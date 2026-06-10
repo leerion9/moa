@@ -144,8 +144,9 @@ python -m scripts.build_universe
 # VI 유니버스 수집 → data/logs/{mode}/vi_universe.xlsx
 python -m scripts.vi_collector
 
-# 갭상승 회복 전략 일일 수집 → data/logs/{mode}/gap_result.xlsx
+# 갭상승 회복 전략 일일 수집 -> gap_result.xlsx (+ 당일 gap_backfill 자동)
 python -m scripts.gap_collector
+# python -m scripts.gap_collector --skip-backfill  # Naver 백필만 생략
 ```
 
 ### 갭 전략 과거 소급 (gap_backfill)
@@ -307,6 +308,7 @@ python -m pytest -q
 #### 6-1. gap_collector 일일 수집 ✅ (운영)
 - `gap_collector` 장마감(15:35~) 실행 **정상** 확인 중 (며칠 더 모니터링)
 - 결과: `data/logs/live/gap_result.xlsx` — **KIS 당일 분봉** (`FHKST03010200`)
+- **같은 실행**에서 당일 `gap_backfill.xlsx`(Naver fchart) + `ticks/` 분봉 캐시도 자동 갱신 (`--skip-backfill`로 생략 가능)
 - **비교·백테스트 기준은 gap_collector(KIS)가 정답**
 
 #### 6-2. gap_backfill 2026-01-01~06-05 크롤링 ✅ (데이터만, xlsx 재정리됨)

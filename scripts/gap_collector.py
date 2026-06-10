@@ -7,6 +7,9 @@
 
 Windows 작업 스케줄러 (15:35~15:40):
     python -m scripts.gap_collector
+
+같은 실행에서 gap_result.xlsx(KIS) 기록 후 gap_backfill.xlsx(Naver) 당일 백필도 자동 수행.
+백필만 생략: --skip-backfill
 """
 
 from __future__ import annotations
@@ -35,6 +38,7 @@ from core.gap_collector_logic import (
     simulate_gap_trade,
 )
 from core.gap_result_xlsx import append_gap_result_rows, read_existing_buy_dates
+from scripts.gap_backfill import backfill_for_date
 from core.history_cache import HistoryCacheStore, load_symbol_bars
 from core.naver_universe import _MARKET_SUM_URL, _MAX_PAGES_PER_MARKET, _parse_market_sum_page
 from core.trading_day import load_manual_holiday_set, should_run_bot_today_kst
@@ -265,6 +269,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--date", help="YYYYMMDD (default: today KST)")
     parser.add_argument("--force", action="store_true", help="같은 매수날짜가 있어도 append")
     parser.add_argument("--skip-history-update", action="store_true", help="history_cache 증분 생략")
+    parser.add_argument(
+        "--skip-backfill",
+        action="store_true",
+        help="gap_backfill.xlsx 당일 Naver 백필 생략",
+    )
     args = parser.parse_args(argv)
 
     now = datetime.now(KST)
@@ -276,8 +285,61 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     xlsx_path = settings.gap_result_xlsx_path
-    if not args.force and date_kst in read_existing_buy_dates(xlsx_path):
+    gap_result_skipped = (
+        not args.force and date_kst in read_existing_buy_dates(xlsx_path)
+    )
+    if gap_result_skipped:
         _log.info("Gap 수집 스킵: %s 이미 gap_result.xlsx에 기록됨", date_kst)
+    else:
+        try:
+            settings.validate()
+        except ValueError as exc:
+            _log.error("설정 오류: %s", exc)
+            return 1
+
+        cache_path = settings.kis_token_cache_path
+        _log.info(
+            "KIS token cache: path=%s exists=%s",
+            cache_path,
+            cache_path.is_file(),
+        )
+
+        api = KISApiClient(settings)
+        try:
+            api.ensure_token()
+        except Exception as exc:
+            _log.error("KIS token 발급/로드 실패: %s", exc)
+            return 1
+
+        caps, names = _load_market_cap_table(settings.naver_http_delay_sec)
+
+        try:
+            rows = collect_gap_trades_for_date(
+                api,
+                date_kst,
+                cap_table=caps,
+                name_table=names,
+                skip_history_update=args.skip_history_update,
+            )
+        except Exception as exc:
+            _log.error("Gap 수집 실패: %s", exc)
+            return 1
+
+        written = append_gap_result_rows(
+            xlsx_path,
+            rows,
+            include_market_fields=True,
+        )
+        _log.info(
+            "Gap 수집 완료 date=%s signals=%d written=%d path=%s",
+            date_kst,
+            len(rows),
+            written,
+            xlsx_path,
+        )
+
+    if args.skip_backfill:
+        _log.info("Backfill 생략 (--skip-backfill)")
         return 0
 
     try:
@@ -286,47 +348,12 @@ def main(argv: list[str] | None = None) -> int:
         _log.error("설정 오류: %s", exc)
         return 1
 
-    cache_path = settings.kis_token_cache_path
-    _log.info(
-        "KIS token cache: path=%s exists=%s",
-        cache_path,
-        cache_path.is_file(),
-    )
-
-    api = KISApiClient(settings)
     try:
-        api.ensure_token()
+        bf_rc = backfill_for_date(date_kst, force=args.force)
     except Exception as exc:
-        _log.error("KIS token 발급/로드 실패: %s", exc)
+        _log.error("Backfill 실패: %s", exc)
         return 1
-
-    caps, names = _load_market_cap_table(settings.naver_http_delay_sec)
-
-    try:
-        rows = collect_gap_trades_for_date(
-            api,
-            date_kst,
-            cap_table=caps,
-            name_table=names,
-            skip_history_update=args.skip_history_update,
-        )
-    except Exception as exc:
-        _log.error("Gap 수집 실패: %s", exc)
-        return 1
-
-    written = append_gap_result_rows(
-        xlsx_path,
-        rows,
-        include_market_fields=True,
-    )
-    _log.info(
-        "Gap 수집 완료 date=%s signals=%d written=%d path=%s",
-        date_kst,
-        len(rows),
-        written,
-        xlsx_path,
-    )
-    return 0
+    return bf_rc
 
 
 if __name__ == "__main__":

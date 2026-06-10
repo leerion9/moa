@@ -63,7 +63,7 @@
 
 ## Phase 5 추가 (README 참고)
 - **VI 수집**: `scripts/vi_collector` → `vi_universe.xlsx` (장마감 후, main 별도)
-- **갭상승 회복 전략**: `gap_collector`(일일/KIS분봉) + `gap_backfill`(과거/네이버 fchart, `--execute`시만 크롤링)
+- **갭상승 회복 전략**: `gap_collector`(일일/KIS분봉 + 당일 Naver backfill) + `gap_backfill`(과거/네이버 fchart, `--execute`시만 크롤링)
 - **KIS 토큰 캐시**: `data/kis_token_cache.json` (main/vi_collector 공유)
 - **n+15 가격 추적**: universe/result xlsx
 - **W52 gap 필터**: `W52_MAX_GAP_PCT=0.30`

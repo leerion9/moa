@@ -113,3 +113,60 @@ def test_run_dry_run_no_execute(tmp_path: Path, monkeypatch):
     rc = gap_backfill.main(["run", "--year", "2025", "--limit", "1"])
     assert rc == 0
     assert not (tmp_path / "gap_backfill.xlsx").exists()
+
+
+def test_backfill_for_date_skips_when_buy_date_exists(tmp_path: Path, monkeypatch):
+    import json
+    from core.gap_result_xlsx import append_gap_result_rows
+    from core.gap_collector_logic import hhmmss_to_time
+
+    cache_dir = tmp_path / "history_cache"
+    cache_dir.mkdir()
+    xlsx = tmp_path / "gap_backfill.xlsx"
+    row = {
+        "buy_ymd": "20250609",
+        "sell_ymd": "20250609",
+        "buy_time": hhmmss_to_time("100000"),
+        "sell_time": hhmmss_to_time("153000"),
+        "symbol": "005930",
+        "name": "삼성전자",
+        "gap_pct": 5.0,
+        "max_dip_pct": 3.0,
+        "buy_price": 70000,
+        "sell_price": 71000,
+        "qty": 1,
+        "buy_amount": 70000.0,
+        "sell_amount": 71000.0,
+        "pnl": 900.0,
+        "return_pct": 1.0,
+        "tax": 10.0,
+        "fee_total": 20.0,
+        "sell_reason": "close",
+        "close_sell": 1,
+    }
+    append_gap_result_rows(xlsx, [row], include_market_fields=False)
+
+    called = {"n": 0}
+
+    def _fake_fetch(*_a, **_k):
+        called["n"] += 1
+        return []
+
+    monkeypatch.setattr(gap_backfill, "fetch_intraday_minute_bars", _fake_fetch)
+    monkeypatch.setattr(
+        gap_backfill,
+        "settings",
+        _mock_settings(
+            history_cache_dir=cache_dir,
+            gap_backfill_dir=tmp_path / "gap_backfill",
+            gap_backfill_xlsx_path=xlsx,
+            gap_backfill_ticks_dir=tmp_path / "ticks",
+            symbol_master_path=tmp_path / "master.json",
+            holiday_dates_path=tmp_path / "missing_holidays.txt",
+        ),
+    )
+    (tmp_path / "master.json").write_text("{}", encoding="utf-8")
+
+    rc = gap_backfill.backfill_for_date("20250609")
+    assert rc == 0
+    assert called["n"] == 0

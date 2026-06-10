@@ -57,7 +57,11 @@ from core.gap_naver_ticks import (
     tick_cache_path,
     ticks_to_minute_bars,
 )
-from core.gap_result_xlsx import append_gap_result_rows, read_existing_trade_keys
+from core.gap_result_xlsx import (
+    append_gap_result_rows,
+    read_existing_buy_dates,
+    read_existing_trade_keys,
+)
 from core.history_cache import load_symbol_bars
 from core.naver_symbol_master import load_or_refresh_symbol_master
 from core.trading_day import load_manual_holiday_set
@@ -243,6 +247,110 @@ def _process_task(
         symbol_bars=symbol_bars,
         holidays=holidays,
     )
+
+
+def backfill_for_date(
+    date_yyyymmdd: str,
+    *,
+    force: bool = False,
+) -> int:
+    """
+    Process all gap candidates for one trading day (Naver fchart + gap_backfill.xlsx).
+
+    Used by gap_collector EOD scheduler; marks state done per symbol even when no signal.
+    """
+    text = str(date_yyyymmdd or "").strip()
+    if len(text) != 8 or not text.isdigit():
+        _log.error("backfill_for_date: invalid date %s", date_yyyymmdd)
+        return 1
+
+    xlsx_path = settings.gap_backfill_xlsx_path
+    if not force and text in read_existing_buy_dates(xlsx_path):
+        _log.info("Backfill 스킵: %s 이미 gap_backfill.xlsx에 기록됨", text)
+        return 0
+
+    symbols = _list_cached_symbols(settings.history_cache_dir)
+    if not symbols:
+        _log.warning("history_cache 비어 있음. backfill 스킵.")
+        return 0
+
+    year = int(text[:4])
+    cache_bars = _load_cache_bars(settings.history_cache_dir, symbols)
+    holidays = load_manual_holiday_set(settings.holiday_dates_path)
+    skip = _collect_skip_keys(xlsx_path, settings.gap_backfill_dir)
+    tasks = plan_tasks_for_year(
+        cache_bars,
+        year,
+        holidays,
+        gap_min_pct=settings.gap_min_pct,
+        gap_max_pct=settings.gap_max_pct,
+        skip_keys=skip,
+        from_ymd=text,
+        to_ymd=text,
+    )
+
+    if not tasks:
+        _log.info("Backfill: %s 처리할 후보 없음 (skip 또는 갭 조건 미충족)", text)
+        return 0
+
+    _log.info(
+        "Backfill 시작 date=%s candidates=%d xlsx=%s",
+        text,
+        len(tasks),
+        xlsx_path,
+    )
+
+    names = load_or_refresh_symbol_master(
+        settings.symbol_master_path,
+        auto_refresh=False,
+        max_age_days=settings.symbol_master_max_age_days,
+        delay_sec=settings.naver_http_delay_sec,
+    )
+    cap_list, cap_names = fetch_market_cap_list(delay_sec=settings.naver_http_delay_sec)
+    caps = {sym: cap for sym, cap in cap_list}
+    for sym, cap_name in cap_names.items():
+        if sym not in names and cap_name:
+            names[sym] = cap_name
+
+    task_symbols = sorted({task.symbol for task in tasks})
+    task_cache_bars = _load_cache_bars(settings.history_cache_dir, task_symbols)
+
+    result_rows: List[Dict[str, object]] = []
+    for i, task in enumerate(tasks, 1):
+        _log.info("Backfill %d/%d %s", i, len(tasks), task.key)
+        try:
+            row = _process_task(
+                task,
+                execute=True,
+                names=names,
+                caps=caps,
+                cache_bars=task_cache_bars,
+                holidays=holidays,
+            )
+        except Exception as exc:
+            _log.error("  실패 %s: %s", task.key, exc)
+            mark_failed(settings.gap_backfill_dir, task.key, str(exc))
+            continue
+
+        mark_done(settings.gap_backfill_dir, task.key)
+        if row is not None:
+            result_rows.append(row)
+
+    if result_rows:
+        written = append_gap_result_rows(
+            xlsx_path,
+            result_rows,
+            include_market_fields=False,
+        )
+        _log.info("Backfill xlsx 기록 %d건 -> %s", written, xlsx_path)
+
+    _log.info(
+        "Backfill 완료 date=%s candidates=%d signals=%d",
+        text,
+        len(tasks),
+        len(result_rows),
+    )
+    return 0
 
 
 def cmd_run(
