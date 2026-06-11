@@ -88,7 +88,7 @@ moa/
 │   ├── gap_backfill/         # 소급 큐·체결 캐시 (git 제외)
 │   ├── kis_token_cache.json  # 토큰 공유 (git 제외)
 │   └── logs/{live|paper}/    # system.log, xlsx, csv
-├── tests/                    # 141개 테스트
+├── tests/                    # 144개 테스트
 ├── .cursorrules
 ├── .env.example
 ├── main.py
@@ -184,7 +184,7 @@ python -m scripts.rebuild_gap_backfill_xlsx --year 2026 --from 20260529 --to 202
 - 시뮬 규칙: **09:00~15:30 정규장**만 사용. 종가 매도 = **15:30 시각** + **일봉 정규장 종가**(장후 가격 아님).
 - xlsx **종가매도여부**: 트레일링=0, 15:30 종가 매도=1
 - xlsx **종가매도수익률**: 행별 가정 수익률 (매수가→당일 종가 매도). 종가매도여부=1이면 수익률과 동일
-- xlsx **익일시가매도수익률**: 행별 가정 수익률 (매수가→익거래일 시가 매도)
+- xlsx **익일시가매도수익률**: 행별 가정 수익률 (매수가→익거래일 시가 매도). 매수 당일엔 익일 시가 없어 **빈칸** → 다음 `gap_collector` 실행 시 `history_cache`로 **자동 보정**
 
 ## 테스트
 ```bash
@@ -301,7 +301,7 @@ python -m pytest -q
 - 체결·분봉 캐시: `data/gap_backfill/ticks/{YYYYMMDD}/{종목}_minute.json`, 큐: `queue_YYYY.json`
 - **xlsx 공통 컬럼 (32개)**: … + **종가매도수익률**·**익일시가매도수익률**·**종가매도여부**
 
-**테스트 현황**: 총 **142개 통과**
+**테스트 현황**: 총 **144개 통과**
 
 ### 📋 Phase 6 — 갭 전략 운영·백필 (2026-06-09)
 
@@ -309,6 +309,7 @@ python -m pytest -q
 - `gap_collector` 장마감(15:35~) 실행 **정상** 확인 중 (며칠 더 모니터링)
 - 결과: `data/logs/live/gap_result.xlsx` — **KIS 당일 분봉** (`FHKST03010200`)
 - **같은 실행**에서 당일 `gap_backfill.xlsx`(Naver fchart) + `ticks/` 분봉 캐시도 자동 갱신 (`--skip-backfill`로 생략 가능)
+- **익일시가매도수익률**: 매수일 다음 거래일 시가가 `history_cache`에 생기면 빈칸 자동 보정 (전일 행)
 - **비교·백테스트 기준은 gap_collector(KIS)가 정답**
 
 #### 6-2. gap_backfill 2026-01-01~06-05 크롤링 ✅ (데이터만, xlsx 재정리됨)
@@ -359,7 +360,11 @@ python -m pytest -q
 
 - 장전 매수·15:30 이후 매도: **0건**
 
-#### 6-6. 다음에 할 일 (미정)
+#### 6-6. 익일시가매도수익률 자동 보정 ✅
+- 매수 당일 xlsx 기록 시 익일 시가가 없어 **빈칸** → 다음 `gap_collector` 실행 시 `history_cache`로 **전일 행 자동 채움**
+- `gap_result.xlsx` + `gap_backfill.xlsx` 동시 갱신 (`refresh_gap_xlsx_next_open_returns`)
+
+#### 6-7. 다음에 할 일 (미정)
 - gap_collector vs gap_backfill **6/9 상세 비교표** (요청 시)
 - 과거 백테스트: **일봉 근사** 별도 검토 또는 **당일 KIS 분봉 누적 저장** 설계
 
@@ -494,6 +499,7 @@ python -m pytest -q
 - `RESULT_WRITE_HHMM=15:32`, `SHUTDOWN_HHMM=15:40`.
 - **현재 운영**: `IS_PAPER_TRADING=false` + `SIM_MODE=true`. 실매매 전환 시 `SIM_MODE=false`.
 - **실매매 전환 전**: `main.py`의 `max_positions` 상한 복원 필요 (n+15 추적용 임시 해제).
-- **gap_backfill**: 기본 dry-run. 크롤링 `--execute`. **KIS gap_collector가 일일 기준**.
+- **gap_backfill**: `gap_collector`가 당일 Naver 백필·ticks 저장. 과거 소급은 `run --execute`. **KIS gap_collector가 일일 기준**.
+- **익일시가매도수익률**: 매수 다음날 `history_cache`에 익일 시가 생기면 `gap_collector`가 xlsx 빈칸 자동 보정.
 - **Naver fchart**: ~5~7거래일만. `rebuild_gap_backfill_xlsx`로 캐시 재시뮬 가능.
 - **갭 시뮬 정규장 규칙**: 09:00~15:30만 사용, 종가 매도 15:30:00.

@@ -326,6 +326,37 @@ def calc_volume_approx_fields(
     }
 
 
+def calc_next_open_return_pct(
+    buy_ymd: str,
+    buy_price: int,
+    qty: int,
+    symbol_bars: Sequence[Dict[str, object]],
+    holidays: FrozenSet[str],
+    *,
+    fee_rate_buy: float,
+    fee_rate_sell: float,
+    tax_rate_sell: float,
+) -> float | None:
+    """Hypothetical return if sold at next trading day's open (None if bar missing)."""
+    if not symbol_bars:
+        return None
+    from core.xlsx_price_track import next_trading_day
+
+    next_ymd = next_trading_day(buy_ymd, holidays)
+    next_open = bar_open_for_ymd(symbol_bars, next_ymd)
+    if next_open <= 0:
+        return None
+    next_amounts = calc_trade_amounts(
+        buy_price,
+        next_open,
+        qty,
+        fee_rate_buy=fee_rate_buy,
+        fee_rate_sell=fee_rate_sell,
+        tax_rate_sell=tax_rate_sell,
+    )
+    return float(next_amounts["return_pct"])
+
+
 def build_gap_result_row(
     cand: GapCandidate,
     trade: GapTradeResult,
@@ -359,22 +390,16 @@ def build_gap_result_row(
         fee_rate_sell=fee_rate_sell,
         tax_rate_sell=tax_rate_sell,
     )
-    next_open_return_pct: float | None = None
-    if symbol_bars and holidays is not None:
-        from core.xlsx_price_track import next_trading_day
-
-        next_ymd = next_trading_day(buy_ymd, holidays)
-        next_open = bar_open_for_ymd(symbol_bars, next_ymd)
-        if next_open > 0:
-            next_amounts = calc_trade_amounts(
-                trade.buy_price,
-                next_open,
-                trade.qty,
-                fee_rate_buy=fee_rate_buy,
-                fee_rate_sell=fee_rate_sell,
-                tax_rate_sell=tax_rate_sell,
-            )
-            next_open_return_pct = float(next_amounts["return_pct"])
+    next_open_return_pct = calc_next_open_return_pct(
+        buy_ymd,
+        trade.buy_price,
+        trade.qty,
+        symbol_bars or [],
+        holidays or frozenset(),
+        fee_rate_buy=fee_rate_buy,
+        fee_rate_sell=fee_rate_sell,
+        tax_rate_sell=tax_rate_sell,
+    )
 
     row: Dict[str, object] = {
         "buy_ymd": buy_ymd,

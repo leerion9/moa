@@ -4,13 +4,16 @@ from __future__ import annotations
 
 from datetime import date, time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, FrozenSet, List, Optional, Set
 
 import openpyxl
 
-from core.gap_collector_logic import ymd_to_date
+from config.settings import Settings, settings as default_settings
+from core.gap_collector_logic import calc_next_open_return_pct, ymd_to_date
+from core.history_cache import load_symbol_bars
+from core.trading_day import load_manual_holiday_set
 from core.vi_collector_logic import cap_vs_trading_value_pct, trading_value_to_billion_won
-from core.xlsx_price_track import write_pct_cell
+from core.xlsx_price_track import write_pct_cell, ymd_to_date as track_ymd_to_date
 
 HEADERS = [
     "번호",
@@ -350,3 +353,109 @@ def append_gap_result_rows(
 
     wb.save(path)
     return len(rows)
+
+
+def _cell_ymd(value: Any) -> str:
+    text = track_ymd_to_date(value)
+    return text or ""
+
+
+def _cell_symbol(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (int, float)):
+        return str(int(value)).zfill(6)
+    text = str(value).strip()
+    return text.zfill(6) if text.isdigit() else text
+
+
+def _cell_is_empty(value: Any) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+def update_missing_next_open_returns(
+    path: Path,
+    *,
+    holidays: FrozenSet[str],
+    history_cache_dir: Path,
+    fee_rate_buy: float,
+    fee_rate_sell: float,
+    tax_rate_sell: float,
+) -> int:
+    """
+    Fill empty 익일시가매도수익률 cells when next-day open is now in history_cache.
+
+    Rows recorded on buy day often lack next-day data until the following session.
+    """
+    if not path.is_file():
+        return 0
+
+    wb = openpyxl.load_workbook(path)
+    bars_cache: Dict[str, List[Dict[str, object]]] = {}
+    updated = 0
+
+    def _bars_for(sym: str) -> List[Dict[str, object]]:
+        if sym not in bars_cache:
+            data = load_symbol_bars(history_cache_dir / f"{sym}.json")
+            raw = data.get("bars") if data else None
+            bars_cache[sym] = (
+                [dict(b) for b in raw if isinstance(b, dict)]
+                if isinstance(raw, list)
+                else []
+            )
+        return bars_cache[sym]
+
+    for ws in wb.worksheets:
+        for row_idx in range(3, ws.max_row + 1):
+            if ws.cell(row_idx, _COL["번호"]).value is None:
+                continue
+            if not _cell_is_empty(ws.cell(row_idx, _COL["익일시가매도수익률"]).value):
+                continue
+
+            buy_ymd = _cell_ymd(ws.cell(row_idx, _COL["매수날짜"]).value)
+            sym = _cell_symbol(ws.cell(row_idx, _COL["종목코드"]).value)
+            buy_price = ws.cell(row_idx, _COL["매수단가"]).value
+            qty = ws.cell(row_idx, _COL["매수수량"]).value
+            if not buy_ymd or not sym or buy_price is None or qty is None:
+                continue
+
+            ret = calc_next_open_return_pct(
+                buy_ymd,
+                int(buy_price),
+                int(qty),
+                _bars_for(sym),
+                holidays,
+                fee_rate_buy=fee_rate_buy,
+                fee_rate_sell=fee_rate_sell,
+                tax_rate_sell=tax_rate_sell,
+            )
+            if ret is None:
+                continue
+
+            write_pct_cell(ws.cell(row_idx, _COL["익일시가매도수익률"]), ret)
+            updated += 1
+
+    if updated:
+        wb.save(path)
+    else:
+        wb.close()
+    return updated
+
+
+def refresh_gap_xlsx_next_open_returns(
+    cfg: Settings | None = None,
+) -> Dict[str, int]:
+    """Update gap_result and gap_backfill xlsx files. Returns path->count."""
+    cfg = cfg or default_settings
+    holidays = load_manual_holiday_set(cfg.holiday_dates_path)
+    counts: Dict[str, int] = {}
+    for path in (cfg.gap_result_xlsx_path, cfg.gap_backfill_xlsx_path):
+        counts[str(path)] = update_missing_next_open_returns(
+            path,
+            holidays=holidays,
+            history_cache_dir=cfg.history_cache_dir,
+            fee_rate_buy=cfg.fee_rate_buy,
+            fee_rate_sell=cfg.fee_rate_sell,
+            tax_rate_sell=cfg.tax_rate_sell,
+        )
+    return counts

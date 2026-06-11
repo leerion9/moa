@@ -6,14 +6,16 @@ from pathlib import Path
 
 import openpyxl
 
-from core.gap_collector_logic import hhmmss_to_time
+from core.gap_collector_logic import calc_next_open_return_pct, hhmmss_to_time
 from core.gap_result_xlsx import (
     HEADERS,
+    _COL,
     append_gap_result_rows,
     read_existing_buy_dates,
     read_last_cumulative_pnl,
     read_max_no,
     sheet_name_for_year,
+    update_missing_next_open_returns,
 )
 
 
@@ -181,4 +183,89 @@ def test_append_without_market_fields(tmp_path: Path):
     assert ws.cell(3, 30).value == 350
     assert ws.cell(3, 31).value == 800_000_000
     assert ws.cell(3, 32).value == 56000
+    wb.close()
+
+
+def test_update_missing_next_open_returns(tmp_path: Path):
+    import json
+
+    from config.settings import settings as real_settings
+
+    cache_dir = tmp_path / "history_cache"
+    cache_dir.mkdir()
+    payload = {
+        "symbol": "005930",
+        "bars": [
+            {
+                "date": "2025.06.09",
+                "open": 70000,
+                "high": 71000,
+                "low": 69000,
+                "close": 70500,
+                "volume": 1000,
+            },
+            {
+                "date": "2025.06.10",
+                "open": 72000,
+                "high": 73000,
+                "low": 71500,
+                "close": 72500,
+                "volume": 900,
+            },
+        ],
+    }
+    (cache_dir / "005930.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    path = tmp_path / "gap_backfill.xlsx"
+    rows = [
+        {
+            "buy_ymd": "20250609",
+            "sell_ymd": "20250609",
+            "buy_time": hhmmss_to_time("110000"),
+            "sell_time": hhmmss_to_time("153000"),
+            "symbol": "005930",
+            "name": "삼성전자",
+            "gap_pct": 4.0,
+            "max_dip_pct": 3.5,
+            "buy_price": 70000,
+            "sell_price": 70500,
+            "qty": 1,
+            "buy_amount": 70000.0,
+            "sell_amount": 70500.0,
+            "pnl": 400.0,
+            "return_pct": 0.57,
+            "tax": 10.0,
+            "fee_total": 20.0,
+            "sell_reason": "close",
+            "close_sell": 1,
+            "close_only_return_pct": 0.57,
+        }
+    ]
+    append_gap_result_rows(path, rows, include_market_fields=False)
+
+    expected = calc_next_open_return_pct(
+        "20250609",
+        70000,
+        1,
+        payload["bars"],
+        frozenset(),
+        fee_rate_buy=real_settings.fee_rate_buy,
+        fee_rate_sell=real_settings.fee_rate_sell,
+        tax_rate_sell=real_settings.tax_rate_sell,
+    )
+    assert expected is not None
+
+    updated = update_missing_next_open_returns(
+        path,
+        holidays=frozenset(),
+        history_cache_dir=cache_dir,
+        fee_rate_buy=real_settings.fee_rate_buy,
+        fee_rate_sell=real_settings.fee_rate_sell,
+        tax_rate_sell=real_settings.tax_rate_sell,
+    )
+    assert updated == 1
+
+    wb = openpyxl.load_workbook(path, data_only=True)
+    ws = wb["2025"]
+    assert ws.cell(3, _COL["익일시가매도수익률"]).value == expected
     wb.close()

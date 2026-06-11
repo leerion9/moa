@@ -9,6 +9,7 @@ Windows 작업 스케줄러 (15:35~15:40):
     python -m scripts.gap_collector
 
 같은 실행에서 gap_result.xlsx(KIS) 기록 후 gap_backfill.xlsx(Naver) 당일 백필도 자동 수행.
+전일 매수 행의 익일시가매도수익률 빈칸도 history_cache 기준으로 자동 보정.
 백필만 생략: --skip-backfill
 """
 
@@ -37,7 +38,7 @@ from core.gap_collector_logic import (
     scan_gap_candidates_from_cache,
     simulate_gap_trade,
 )
-from core.gap_result_xlsx import append_gap_result_rows, read_existing_buy_dates
+from core.gap_result_xlsx import append_gap_result_rows, read_existing_buy_dates, refresh_gap_xlsx_next_open_returns
 from scripts.gap_backfill import backfill_for_date
 from core.history_cache import HistoryCacheStore, load_symbol_bars
 from core.naver_universe import _MARKET_SUM_URL, _MAX_PAGES_PER_MARKET, _parse_market_sum_page
@@ -340,7 +341,20 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.skip_backfill:
         _log.info("Backfill 생략 (--skip-backfill)")
-        return 0
+    else:
+        try:
+            settings.validate()
+        except ValueError as exc:
+            _log.error("설정 오류: %s", exc)
+            return 1
+
+        try:
+            bf_rc = backfill_for_date(date_kst, force=args.force)
+        except Exception as exc:
+            _log.error("Backfill 실패: %s", exc)
+            return 1
+        if bf_rc != 0:
+            return bf_rc
 
     try:
         settings.validate()
@@ -349,11 +363,14 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     try:
-        bf_rc = backfill_for_date(date_kst, force=args.force)
+        filled = refresh_gap_xlsx_next_open_returns(settings)
     except Exception as exc:
-        _log.error("Backfill 실패: %s", exc)
+        _log.error("익일시가매도수익률 갱신 실패: %s", exc)
         return 1
-    return bf_rc
+    for path_str, count in filled.items():
+        if count:
+            _log.info("익일시가매도수익률 갱신 %d건 -> %s", count, path_str)
+    return 0
 
 
 if __name__ == "__main__":

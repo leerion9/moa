@@ -63,7 +63,7 @@
 
 ## Phase 5 추가 (README 참고)
 - **VI 수집**: `scripts/vi_collector` → `vi_universe.xlsx` (장마감 후, main 별도)
-- **갭상승 회복 전략**: `gap_collector`(일일/KIS분봉 + 당일 Naver backfill) + `gap_backfill`(과거/네이버 fchart, `--execute`시만 크롤링)
+- **갭상승 회복 전략**: `gap_collector`(일일/KIS분봉 + 당일 Naver backfill + 익일시가 xlsx 보정) + `gap_backfill`(과거/네이버 fchart, `--execute`시만 크롤링)
 - **KIS 토큰 캐시**: `data/kis_token_cache.json` (main/vi_collector 공유)
 - **n+15 가격 추적**: universe/result xlsx
 - **W52 gap 필터**: `W52_MAX_GAP_PCT=0.30`
@@ -86,6 +86,7 @@
 - **종가 매도**: 15:30 시각 + 일봉 정규장 종가 (장후 fchart 봉 미사용)
 - **xlsx 종가매도여부**: 0=트레일링, 1=종가
 - **xlsx 종가매도수익률/익일시가매도수익률**: 행별 가정 수익률 (당일종가·익일시가 매도)
+- **익일시가매도수익률 보정**: 매수 당일 빈칸 → 다음 `gap_collector`가 `history_cache` 익일 시가로 gap_result/backfill xlsx 자동 채움
 
 ### 데이터 한계
 - Naver fchart: **최근 ~5~7거래일**만. 1주+ 과거 무료 소급 불가
